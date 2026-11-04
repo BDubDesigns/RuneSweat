@@ -24,6 +24,27 @@ export interface HudReadout {
   lastFrameAgeMs: number | null;
   /** Landmarks in the last inference frame (33 = a person detected). */
   landmarkCount: number | null;
+  /**
+   * Inference-failure signals (Nov 4, 2026 freeze: the HUD showed a
+   * healthy-looking body while inference had silently stopped). All
+   * optional — sim/replay and older callers leave them unset. The
+   * coordinator wires these from the MediaPipe source in main.ts.
+   */
+  /** How many inference errors the source has counted (undefined = n/a). */
+  inferenceErrors?: number;
+  /** Last inference error message, truncated to ~40 chars when drawn. */
+  lastInferenceError?: string | null;
+  /** Active MediaPipe delegate, when the source reports one. */
+  delegate?: 'GPU' | 'CPU' | null;
+  /** True when the camera video's currentTime has stopped advancing. */
+  videoFrozen?: boolean;
+  /** Age of the video element's currentTime in ms (null = unknown). */
+  videoCurrentTimeAgeMs?: number | null;
+}
+
+/** Truncate a message to `maxChars`, with an ellipsis when cut. */
+function truncate(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
 /** Draw the debug readout in the top-left corner of the canvas. */
@@ -42,8 +63,30 @@ export function drawHud(
           : `  frame age ${(readout.lastFrameAgeMs / 1000).toFixed(1)}s`) +
         (readout.landmarkCount === null
           ? ''
-          : `  landmarks ${readout.landmarkCount}`),
+          : `  landmarks ${readout.landmarkCount}`) +
+        (readout.delegate === undefined || readout.delegate === null
+          ? ''
+          : `  delegate ${readout.delegate}`),
   ];
+  if (readout.inferenceErrors !== undefined) {
+    lines.push(
+      `inference errors ${readout.inferenceErrors}` +
+        (readout.lastInferenceError === undefined ||
+        readout.lastInferenceError === null
+          ? ''
+          : `  last: ${truncate(readout.lastInferenceError, 40)}`),
+    );
+  }
+  if (readout.videoFrozen === true) {
+    lines.push('video FROZEN');
+  } else if (
+    readout.videoCurrentTimeAgeMs !== undefined &&
+    readout.videoCurrentTimeAgeMs !== null
+  ) {
+    lines.push(
+      `video time age ${(readout.videoCurrentTimeAgeMs / 1000).toFixed(1)}s`,
+    );
+  }
   const body = readout.body;
   if (body !== null && body.present) {
     const v = body.landmarkVisibility;

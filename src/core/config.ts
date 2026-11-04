@@ -43,21 +43,33 @@ export const STAGE = {
  */
 export const GATE = {
   /**
-   * Minimum per-landmark visibility for shoulders + hips. Reuses
-   * `POSE.minVisibility`; the gate checks each of the four landmarks
-   * individually — the mean `visibilityScore` can hide one bad landmark.
+   * Minimum per-landmark visibility for shoulders + hips + knees. Reuses
+   * `POSE.minVisibility`; the gate checks each landmark individually —
+   * the mean `visibilityScore` can hide one bad landmark.
    */
   minVisibility: 0.5,
   /**
-   * Knees are nice-to-have in v1, not a blocker: a player whose knees are
-   * out of frame (or low-visibility) can still steer and shoot, so warn
-   * but do not block. Set true only if a future game genuinely needs legs.
+   * Knees are required for full-body swing games: a body counts as usable
+   * only when shoulders + hips + knees are EACH at or above
+   * `minVisibility`. The Nov 4, 2026 Swing Lab playtest showed "Body
+   * found" while the knees were hidden, so the gate was trusting a
+   * partial body. The grace period still covers mid-game knee flicker.
    */
-  requireKnees: false,
+  requireKnees: true,
+  /**
+   * A pose frame older than this (ms) counts as a frozen feed and closes
+   * the gate, even inside the grace period. The Nov 4 playtest ran for
+   * 142 s off a single inference frame and never paused — the gate
+   * trusted `bodyUsable` with no age check. 2000 ms is far above the
+   * ~110 ms cadence of ~9 Hz inference, so a healthy feed never trips it.
+   */
+  staleFrameMs: 2000,
   /**
    * Grace period in ms before the gate trips when a pose is lost mid-game,
    * so a single dropped inference frame does not pause the game. A game
    * started with no usable pose ever is gated immediately (no grace).
+   * Staleness (see `staleFrameMs`) beats the grace period: a frozen frame
+   * must not stay open via grace.
    */
   gracePeriodMs: 500,
 } as const;
@@ -134,6 +146,20 @@ export const POSE = {
   delegate: 'GPU' as 'GPU' | 'CPU',
   /** Minimum time between inference calls, in ms. Render never waits on this. */
   inferenceMinIntervalMs: 0,
+  /**
+   * Consecutive failed inferences before the source recovers: on GPU it
+   * closes and re-creates the landmarker on the CPU delegate; on CPU it
+   * stops inferring (`inferenceStopped`) instead of failing silently
+   * forever. See `tracking/mediapipeSource.ts`.
+   */
+  maxConsecutiveFailures: 10,
+  /**
+   * ms without `video.currentTime` advancing (while the stream is live)
+   * before the video counts as frozen (`videoFrozen`). A frozen video
+   * means every inference sees the same frame, however healthy the model
+   * looks — the Nov 4, 2026 Pixel playtest froze exactly this way.
+   */
+  videoFrozenMs: 2000,
   /** Landmark `visibility` below this counts as "not confidently seen". */
   minVisibility: 0.5,
   /** Torso must be inside this x-range (video space) to count as in frame. */

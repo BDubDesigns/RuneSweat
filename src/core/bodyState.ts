@@ -76,16 +76,17 @@ export interface BodyState {
   /** Torso is confidently seen and inside the frame margins. */
   inFrame: boolean;
   /**
-   * Usable full-body pose: present AND in frame AND shoulders + hips each
-   * individually at or above `GATE.minVisibility` (the mean
-   * `visibilityScore` can hide one bad landmark). Knees are required only
-   * when `GATE.requireKnees` is true (false in v1 — see config). This is
-   * what the body-visible gate runs on.
+   * Usable full-body pose: present AND in frame AND shoulders + hips +
+   * knees each individually at or above `GATE.minVisibility` (the mean
+   * `visibilityScore` can hide one bad landmark). Knees are required
+   * because the swing games need the whole body — the Nov 4, 2026
+   * playtest showed "Body found" with the knees hidden. This is what the
+   * body-visible gate runs on.
    */
   bodyUsable: boolean;
   /** Per-landmark visibility for shoulders / hips / knees. */
   landmarkVisibility: LandmarkVisibility;
-  /** Both knees confidently visible (informational when requireKnees is false). */
+  /** Both knees confidently visible — feeds `bodyUsable` (see below). */
   kneesVisible: boolean;
   /** Smoothed shoulder-midpoint y, video space [0,1]. Windup / strike
    *  lines are measured from here (wrist height above/below the shoulders).
@@ -540,9 +541,10 @@ export class BodyStateTracker {
       torso.x > POSE.inFrameMarginX &&
       torso.x < 1 - POSE.inFrameMarginX;
 
-    // Each of the four torso landmarks must be individually confident —
-    // a mean can hide one shoulder/hip the model barely sees. Knees only
-    // gate when GATE.requireKnees is true (false in v1).
+    // Each of the six torso/leg landmarks must be individually confident —
+    // a mean can hide one shoulder/hip/knee the model barely sees. Knees
+    // gate when GATE.requireKnees is true (true since the Nov 4 playtest:
+    // a full-body swing game cannot trust a body whose knees it can't see).
     const landmarkVisibility: LandmarkVisibility = {
       leftShoulder: ls.visibility ?? 0,
       rightShoulder: rs.visibility ?? 0,

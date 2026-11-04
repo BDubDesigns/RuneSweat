@@ -23,12 +23,12 @@ import './styles.css';
 
 import replayFixture from '../fixtures/replay-sweep.json';
 import { GAMES, GATE, LOOP, SOURCE_SELECTION, STAGE } from './core/config';
-import { startCamera, CameraError } from './core/camera';
+import { startCamera, stopCamera, CameraError } from './core/camera';
 import { SoundEffects } from './core/audio';
 import { BodyStateTracker, type BodyState } from './core/bodyState';
-import { evaluateGate, type GateState, type ModelState } from './core/gate';
+import { evaluateGate, type GateOptions, type GateState, type ModelState } from './core/gate';
 import { createFixedStepLoop } from './core/loop';
-import { drawHud } from './debug/hud';
+import { drawHud, type HudReadout } from './debug/hud';
 import { syncCanvasBackingStore, toNormalized, type Vec2 } from './render/stage';
 import {
   drawBlockingOverlay,
@@ -93,6 +93,7 @@ function main(): void {
   const btnMute = requireElement('btn-mute', HTMLButtonElement);
   const btnDebug = requireElement('btn-debug', HTMLButtonElement);
   const btnVideo = requireElement('btn-video', HTMLButtonElement);
+  const btnRetry = requireElement('btn-retry', HTMLButtonElement);
 
   const sfx = new SoundEffects();
   const tracker = new BodyStateTracker();
@@ -114,6 +115,19 @@ function main(): void {
   let showVideo: boolean = false;
   let latestBody: BodyState | null = null;
   let latestLandmarks: readonly NormalizedLandmark[] | null = null;
+  /**
+   * Timestamp of the last DISTINCT pose frame received. frameAt() returns
+   * the same frame (same timestamp) while throttled or stalled, so a
+   * changed timestamp is how the hub knows fresh data arrived.
+   */
+  let lastFrameTimestampMs: number | null = null;
+  /**
+   * rAF time (ms) a distinct pose frame was last received; null when none
+   * yet. The gate's staleness check reads `nowMs - lastFrameReceivedMs` —
+   * arrival time, not the frame's own timestamp, so a source replaying
+   * one frozen frame cannot look fresh.
+   */
+  let lastFrameReceivedMs: number | null = null;
 
   // --- body-visible gate state (see src/core/gate.ts) ---
   /** Last ms a usable body was seen; null when never. Feeds the grace period. */
@@ -138,6 +152,7 @@ function main(): void {
   function modelState(): ModelState {
     if (mediaPipe === null) return 'not-applicable';
     if (mediaPipe.error !== null) return 'failed';
+    if (mediaPipe.inferenceStopped) return 'inference-stopped';
     return mediaPipe.ready ? 'ready' : 'loading';
   }
 
@@ -216,6 +231,8 @@ function main(): void {
     loop.stop();
     latestBody = null;
     latestLandmarks = null;
+    lastFrameTimestampMs = null;
+    lastFrameReceivedMs = null;
     pendingStart = false;
     pausedByGate = false;
     lastUsableMs = null;
@@ -234,6 +251,7 @@ function main(): void {
     outOfFrame.hidden = true;
     outOfFrame.classList.remove('ok');
     gameHud.textContent = '';
+    btnRetry.disabled = true;
     setStatus('');
   }
 
@@ -256,6 +274,7 @@ function main(): void {
     mediaPipe = new MediaPipePoseSource(defaultMediaPipeOptions(video));
     mediaPipe.start(globalThis.performance.now());
     activeSource = mediaPipe;
+    btnRetry.disabled = false;
     setStatus('Camera on! Pick a game — stand back so your whole body fits. You won\'t see yourself — you\'ll see your skeleton.');
     btnSim.disabled = true;
     if (pendingGameId !== null) {
@@ -263,6 +282,32 @@ function main(): void {
       pendingGameId = null;
       startGame(gameId);
     }
+  }
+
+  /**
+   * Restart the camera feed from scratch: stop the current source and
+   * video, then re-run startCameraSource. This is the way back from a
+   * frozen feed or a stopped inference — resuming the same source would
+   * keep returning the same dead frame. The picked game keeps running
+   * (gated) while the new source warms up; the gate reopens it once a
+   * fresh usable body arrives.
+   */
+  async function restartCameraSource(): Promise<void> {
+    if (mediaPipe === null) return;
+    mediaPipe.stop();
+    mediaPipe = null;
+    if (video !== null) {
+      stopCamera(video);
+      video = null;
+    }
+    activeSource = null;
+    latestBody = null;
+    latestLandmarks = null;
+    lastFrameTimestampMs = null;
+    lastFrameReceivedMs = null;
+    lastUsableMs = null;
+    btnCamera.disabled = false;
+    await startCameraSource();
   }
 
   function startSimSource(): void {
@@ -342,6 +387,10 @@ function main(): void {
   btnVideo.addEventListener('click', () => {
     showVideo = !showVideo;
     btnVideo.textContent = showVideo ? '📷 Hide Camera' : '📷 Show Camera';
+  });
+  btnRetry.addEventListener('click', () => {
+    sfx.unlock();
+    void restartCameraSource();
   });
   if (sfx.isMuted) btnMute.textContent = '🔇 Sound Off';
 
@@ -426,16 +475,29 @@ function main(): void {
     maxUpdatesPerFrame: LOOP.maxUpdatesPerFrame,
     update: (dtMs, nowMs) => {
       if (activeSource === null || activeGame === null) return;
-      const frame = activeSource.frameAt(nowMs);
-      if (frame !== null) {
-        latestBody = tracker.update(frame);
-        latestLandmarks = frame.landmarks;
-      }
+      // Pose frames are fetched once per rendered frame in render(),
+      // never here: calling frameAt once per update step fed
+      // detectForVideo the same timestamp several times on catch-up
+      // frames, which MediaPipe VIDEO mode rejects (Nov 4, 2026 freeze).
       // Body-visible gate: evaluated every step from the latest body state
       // and the model state. While gated the simulation never advances.
-      const gate = evaluateGate(latestBody, nowMs, lastUsableMs, modelState(), {
-        gracePeriodMs: GATE.gracePeriodMs,
-      });
+      // frameAgeMs is the age of the last DISTINCT frame received, so a
+      // frozen feed closes the gate even when the last frame looked fine.
+      const gateOptions: GateOptions = { gracePeriodMs: GATE.gracePeriodMs };
+      if (lastFrameReceivedMs !== null) {
+        gateOptions.frameAgeMs = nowMs - lastFrameReceivedMs;
+      }
+      const lastError = mediaPipe?.lastError;
+      if (lastError !== null && lastError !== undefined) {
+        gateOptions.inferenceError = lastError.message;
+      }
+      const gate = evaluateGate(
+        latestBody,
+        nowMs,
+        lastUsableMs,
+        modelState(),
+        gateOptions,
+      );
       applyGate(gate);
       if (gate.gated) return;
       if (pendingStart) {
@@ -445,6 +507,22 @@ function main(): void {
       activeGame.update(dtMs, nowMs, latestBody, latestLandmarks);
     },
     render: (_alpha, nowMs) => {
+      // Inference runs ONCE per rendered frame, here — the loop's update
+      // steps share the frame this fetched, so detectForVideo never sees
+      // the same timestamp twice in one frame. A frame counts as new only
+      // when its timestamp changed: a throttled or stalled source keeps
+      // returning the same frame, and the gate's staleness check must see
+      // that age grow instead of being reset by a repeat.
+      if (activeSource !== null && activeGame !== null) {
+        const frame = activeSource.frameAt(nowMs);
+        if (frame !== null && frame.timestampMs !== lastFrameTimestampMs) {
+          lastFrameTimestampMs = frame.timestampMs;
+          lastFrameReceivedMs = nowMs;
+          latestBody = tracker.update(frame);
+          latestLandmarks = frame.landmarks;
+        }
+      }
+
       // Fixed landscape stage, ALWAYS — never the video's intrinsic size.
       syncCanvasBackingStore(canvas, STAGE.width, STAGE.height);
 
@@ -501,28 +579,37 @@ function main(): void {
       }
 
       if (showDebug && activeSource !== null) {
-        const inferenceHz =
-          mediaPipe !== null && activeSource === mediaPipe
-            ? mediaPipe.inferenceStats.hz
-            : 0;
-        const lastFrameMs =
-          mediaPipe !== null && activeSource === mediaPipe
-            ? mediaPipe.lastFrameTimestampMs
-            : (latestBody?.timestampMs ?? null);
-        drawHud(context, {
+        // Inline narrowing (not the isCamera alias): aliased-condition
+        // narrowing does not survive into these ternaries under this
+        // tsconfig, so each use checks mediaPipe directly.
+        let inferenceHz = 0;
+        let lastFrameMs: number | null = latestBody?.timestampMs ?? null;
+        let modelReady: boolean | null = null;
+        if (mediaPipe !== null && activeSource === mediaPipe) {
+          inferenceHz = mediaPipe.inferenceStats.hz;
+          lastFrameMs = mediaPipe.lastFrameTimestampMs;
+          modelReady = mediaPipe.ready;
+        }
+        const readout: HudReadout = {
           fps: loop.stats.fps,
           inferenceHz,
           poseMatchScore: null,
           sourceId: activeSource.id,
           body: latestBody,
-          modelReady:
-            mediaPipe !== null && activeSource === mediaPipe
-              ? mediaPipe.ready
-              : null,
+          modelReady,
           lastFrameAgeMs: lastFrameMs === null ? null : nowMs - lastFrameMs,
           landmarkCount:
             latestLandmarks === null ? null : latestLandmarks.length,
-        });
+        };
+        // Same inline-narrowing rule as above for the camera-only fields.
+        if (mediaPipe !== null && activeSource === mediaPipe) {
+          readout.inferenceErrors = mediaPipe.consecutiveFailures;
+          readout.lastInferenceError = mediaPipe.lastError?.message ?? null;
+          readout.delegate = mediaPipe.delegateInUse;
+          readout.videoFrozen = mediaPipe.videoFrozen;
+          readout.videoCurrentTimeAgeMs = mediaPipe.videoCurrentTimeAgeMs;
+        }
+        drawHud(context, readout);
       }
 
       // Surface a model-load failure in the hub status line too (the

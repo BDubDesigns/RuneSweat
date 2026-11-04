@@ -2,11 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { evaluateGate, type ModelState } from './gate';
 import { BodyStateTracker, type BodyState } from './bodyState';
 import { makeFrame, makePose } from './poseFixture';
+import { PoseLandmark } from '../tracking/poseTypes';
 import { MouseSource } from '../sim/mouseSource';
 
 function usableBody(): BodyState {
   const tracker = new BodyStateTracker();
   return tracker.update(makeFrame(makePose({}), 1000));
+}
+
+/** A body whose knees the model barely sees — the Nov 4 playtest shape. */
+function kneesHiddenBody(): BodyState {
+  const tracker = new BodyStateTracker();
+  const pose = makePose({
+    visibilityOverrides: {
+      [PoseLandmark.LEFT_KNEE]: 0.1,
+      [PoseLandmark.RIGHT_KNEE]: 0.1,
+    },
+  });
+  return tracker.update(makeFrame(pose, 1000));
 }
 
 function noBody(): BodyState {
@@ -81,6 +94,93 @@ describe('evaluateGate', () => {
     const gate = evaluateGate(usableBody(), 1000, null, 'not-applicable');
     expect(gate.gated).toBe(false);
   });
+
+  it('a knees-hidden body gates: knees are required for swing games', () => {
+    const body = kneesHiddenBody();
+    expect(body.bodyUsable).toBe(false);
+    const gate = evaluateGate(body, 1000, null, 'ready');
+    expect(gate.gated).toBe(true);
+    expect(gate.reason).toBe('no-body');
+  });
+});
+
+describe('evaluateGate stale frames', () => {
+  it('is open when the usable body frame is fresh', () => {
+    const gate = evaluateGate(usableBody(), 1000, null, 'ready', {
+      frameAgeMs: 100,
+    });
+    expect(gate.gated).toBe(false);
+    expect(gate.reason).toBe('open');
+  });
+
+  it('gates a usable body whose frame is stale', () => {
+    const gate = evaluateGate(usableBody(), 1000, null, 'ready', {
+      frameAgeMs: 3000,
+    });
+    expect(gate.gated).toBe(true);
+    expect(gate.reason).toBe('stale-frame');
+    expect(gate.message).toBe('Pose feed frozen — tap Retry');
+  });
+
+  it('staleness beats the grace period mid-game', () => {
+    // Body was usable at 1000 ms, frame frozen since; 400 ms later the
+    // grace period (500 ms) would still be open — staleness must win.
+    const gate = evaluateGate(usableBody(), 1400, 1000, 'ready', {
+      gracePeriodMs: 500,
+      frameAgeMs: 3000,
+    });
+    expect(gate.gated).toBe(true);
+    expect(gate.reason).toBe('stale-frame');
+  });
+
+  it('a frame at the staleness boundary does not gate', () => {
+    const gate = evaluateGate(usableBody(), 1000, null, 'ready', {
+      frameAgeMs: 2000,
+    });
+    expect(gate.gated).toBe(false);
+  });
+
+  it('without frameAgeMs the grace period still works (callers unchanged)', () => {
+    const gate = evaluateGate(noBody(), 1400, 1000, 'ready', {
+      gracePeriodMs: 500,
+    });
+    expect(gate.gated).toBe(false);
+    expect(gate.reason).toBe('open');
+  });
+});
+
+describe('evaluateGate inference-stopped', () => {
+  it('gates with the retry message when no error is attached', () => {
+    const gate = evaluateGate(usableBody(), 1000, 1000, 'inference-stopped');
+    expect(gate.gated).toBe(true);
+    expect(gate.reason).toBe('inference-stopped');
+    expect(gate.message).toBe('Pose detection stopped — tap Retry');
+  });
+
+  it('includes the inference error in the message', () => {
+    const gate = evaluateGate(usableBody(), 1000, 1000, 'inference-stopped', {
+      inferenceError: 'GPU delegate failed',
+    });
+    expect(gate.gated).toBe(true);
+    expect(gate.reason).toBe('inference-stopped');
+    expect(gate.message).toBe('Pose detection stopped — GPU delegate failed');
+  });
+
+  it('truncates a long inference error to ~60 chars', () => {
+    const longError = 'x'.repeat(100);
+    const gate = evaluateGate(usableBody(), 1000, 1000, 'inference-stopped', {
+      inferenceError: longError,
+    });
+    expect(gate.message).toBe(`Pose detection stopped — ${'x'.repeat(60)}…`);
+    expect(gate.message.length).toBeLessThanOrEqual(
+      'Pose detection stopped — '.length + 61,
+    );
+  });
+
+  it('gates even when a body was usable before the stop', () => {
+    const gate = evaluateGate(usableBody(), 1000, 1000, 'inference-stopped');
+    expect(gate.gated).toBe(true);
+  });
 });
 
 describe('gate + MouseSource', () => {
@@ -115,7 +215,13 @@ describe('gate + MouseSource', () => {
 
 describe('model state plumbing', () => {
   it('covers every ModelState the hub can produce', () => {
-    const states: ModelState[] = ['not-applicable', 'loading', 'ready', 'failed'];
-    expect(states).toHaveLength(4);
+    const states: ModelState[] = [
+      'not-applicable',
+      'loading',
+      'ready',
+      'failed',
+      'inference-stopped',
+    ];
+    expect(states).toHaveLength(5);
   });
 });

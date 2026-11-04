@@ -191,7 +191,7 @@ describe('BodyStateTracker bodyUsable', () => {
     expect(state.bodyUsable).toBe(false);
   });
 
-  it('is still usable when knees are missing (requireKnees is false in v1)', () => {
+  it('is not usable when knees are hidden (requireKnees is true)', () => {
     const tracker = new BodyStateTracker();
     const pose = makePose({
       visibilityOverrides: {
@@ -201,7 +201,19 @@ describe('BodyStateTracker bodyUsable', () => {
     });
     const state = tracker.update(makeFrame(pose, 1000));
     expect(state.kneesVisible).toBe(false);
-    expect(state.bodyUsable).toBe(true);
+    // Nov 4, 2026 playtest: the gate said "Body found" with knees hidden.
+    // A full-body swing game cannot trust a body whose knees it can't see.
+    expect(state.bodyUsable).toBe(false);
+  });
+
+  it('is not usable when one knee is hidden', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      visibilityOverrides: { [PoseLandmark.RIGHT_KNEE]: 0.2 },
+    });
+    const state = tracker.update(makeFrame(pose, 1000));
+    expect(state.kneesVisible).toBe(false);
+    expect(state.bodyUsable).toBe(false);
   });
 
   it('is not usable when every torso landmark is low-visibility', () => {

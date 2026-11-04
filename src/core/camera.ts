@@ -79,6 +79,22 @@ export async function startCamera(): Promise<HTMLVideoElement> {
   const video = document.createElement('video');
   video.muted = true;
   video.playsInline = true;
+  /**
+   * Attach hidden to the DOM: Android Chrome may pause a video element
+   * that is never attached, which starves inference of new frames while
+   * the model itself looks healthy (Nov 4, 2026 Pixel playtest).
+   * Hidden via opacity + off-screen position — NOT `display: none`,
+   * which can itself pause playback in some browsers.
+   */
+  video.style.position = 'fixed';
+  video.style.left = '0';
+  video.style.top = '0';
+  video.style.width = '1px';
+  video.style.height = '1px';
+  video.style.opacity = '0';
+  video.style.pointerEvents = 'none';
+  video.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(video);
   video.srcObject = stream;
   try {
     await video.play();
@@ -98,4 +114,6 @@ export function stopCamera(video: HTMLVideoElement): void {
     }
   }
   video.srcObject = null;
+  // Undo the hidden attach from startCamera().
+  video.remove();
 }

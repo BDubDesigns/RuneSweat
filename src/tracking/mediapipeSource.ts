@@ -12,6 +12,21 @@
  * imported lazily so the hub loads instantly and the ~1 MB WASM runtime is
  * only fetched when the camera starts.
  *
+ * Two silent-freeze guards live here (Nov 4, 2026 Pixel playtest: model
+ * LOADED, inference 0.0 Hz, frame age 142.2 s — exactly one inference
+ * frame ever succeeded and everything ran off that stale frame):
+ * - `detectForVideo()` is never called twice with the same timestamp.
+ *   MediaPipe VIDEO mode requires strictly increasing timestamps, and the
+ *   fixed-step loop calls `frameAt()` several times per rAF frame with the
+ *   same `nowMs` on catch-up steps, so a duplicate timestamp silently
+ *   kills every inference after the first.
+ * - Inference failures are counted and surfaced (`lastError`,
+ *   `consecutiveFailures`, `inferenceStopped`) instead of swallowed, and
+ *   the source retries on the CPU delegate after
+ *   `POSE.maxConsecutiveFailures` GPU failures. The video's own liveness
+ *   is tracked too (`videoFrozen`, `videoCurrentTimeAgeMs`): a video whose
+ *   `currentTime` stops advancing feeds the model the same frame forever.
+ *
  * API verified against the installed @mediapipe/tasks-vision 1.2.2
  * `vision.d.ts` (Nov 4, 2026): `FilesetResolver.forVisionTasks`,
  * `PoseLandmarker.createFromOptions` with `baseOptions.modelAssetPath` /
@@ -43,6 +58,15 @@ export interface MediaPipePoseSourceOptions {
   numPoses: number;
   /** Minimum ms between inference calls. */
   inferenceMinIntervalMs: number;
+  /**
+   * Test seam ONLY: overrides the real `PoseLandmarker.createFromOptions`
+   * path so tests can inject a fake landmarker (counting calls, throwing
+   * on demand) without loading the model or WASM. Production always
+   * omits it.
+   */
+  createLandmarker?: (
+    delegate: 'GPU' | 'CPU',
+  ) => Promise<PoseLandmarkerInstance>;
 }
 
 type PoseLandmarkerInstance = PoseLandmarker;
@@ -86,8 +110,40 @@ export class MediaPipePoseSource implements PoseFrameSource {
   private cpuFallbackTried = false;
   public readonly inferenceStats = new InferenceStats();
 
+  /**
+   * Timestamp of the last `detectForVideo()` attempt. MediaPipe VIDEO
+   * mode requires strictly monotonically increasing timestamps — a
+   * repeat or a step backwards must never reach the landmarker.
+   */
+  private lastAttemptedTs = 0;
+
+  /** Most recent inference failure, if any. Cleared by a success. */
+  private lastInferenceError: Error | null = null;
+  /** Failures since the last success (or the last delegate switch). */
+  private failureCount = 0;
+  /** Which delegate the live landmarker runs on. */
+  private currentDelegate: 'GPU' | 'CPU';
+  /**
+   * True once the CPU landmarker has also failed
+   * `POSE.maxConsecutiveFailures` times in a row (or a CPU re-init
+   * itself failed): inference is dead and `frameAt()` stops attempting
+   * it. A `stop()` + `start()` cycle is the way back.
+   */
+  private stopped = false;
+  /** In-flight GPU -> CPU re-init, so concurrent failures trigger one. */
+  private reinitPromise: Promise<void> | null = null;
+
+  /** Video liveness: `currentTime` as last observed, and when it moved. */
+  private lastVideoCurrentTime: number | null = null;
+  private lastVideoCurrentTimeChangeMs: number | null = null;
+  private lastLivenessCheckMs: number | null = null;
+  private videoLive = false;
+  /** True once `video.play()` has been retried for the current stall. */
+  private playRetryDone = false;
+
   public constructor(options: MediaPipePoseSourceOptions) {
     this.options = options;
+    this.currentDelegate = options.delegate;
   }
 
   /** The init failure, if the model/WASM could not load. Shown in the hub. */
@@ -97,6 +153,52 @@ export class MediaPipePoseSource implements PoseFrameSource {
 
   public get ready(): boolean {
     return this.landmarker !== null;
+  }
+
+  /** The most recent inference error, or null after a success. */
+  public get lastError(): Error | null {
+    return this.lastInferenceError;
+  }
+
+  /** Consecutive failed inferences since the last success. */
+  public get consecutiveFailures(): number {
+    return this.failureCount;
+  }
+
+  /** Which delegate the live landmarker runs on. */
+  public get delegateInUse(): 'GPU' | 'CPU' {
+    return this.currentDelegate;
+  }
+
+  /** True when inference has given up (see `stopped` above). */
+  public get inferenceStopped(): boolean {
+    return this.stopped;
+  }
+
+  /**
+   * True when the live video's `currentTime` has not advanced for more
+   * than `POSE.videoFrozenMs`. A frozen video feeds the model the same
+   * frame forever, however healthy the model looks.
+   */
+  public get videoFrozen(): boolean {
+    const ageMs = this.videoCurrentTimeAgeMs;
+    return (
+      this.videoLive && ageMs !== null && ageMs > POSE.videoFrozenMs
+    );
+  }
+
+  /**
+   * ms since `video.currentTime` last advanced, as of the most recent
+   * `frameAt()` call; null before the first observation of a live video.
+   */
+  public get videoCurrentTimeAgeMs(): number | null {
+    if (
+      this.lastVideoCurrentTimeChangeMs === null ||
+      this.lastLivenessCheckMs === null
+    ) {
+      return null;
+    }
+    return this.lastLivenessCheckMs - this.lastVideoCurrentTimeChangeMs;
   }
 
   /**
@@ -116,6 +218,17 @@ export class MediaPipePoseSource implements PoseFrameSource {
   public start(nowMs: number): void {
     this.started = true;
     this.lastInferenceMs = nowMs;
+    // A restart is a fresh attempt: clear the stopped state and the
+    // failure record from the previous run.
+    this.stopped = false;
+    this.failureCount = 0;
+    this.lastInferenceError = null;
+    this.lastAttemptedTs = 0;
+    this.lastVideoCurrentTime = null;
+    this.lastVideoCurrentTimeChangeMs = null;
+    this.lastLivenessCheckMs = null;
+    this.videoLive = false;
+    this.playRetryDone = false;
     if (this.initPromise === null) {
       this.initPromise = this.init().catch((error: unknown) => {
         this.initError =
@@ -134,53 +247,145 @@ export class MediaPipePoseSource implements PoseFrameSource {
     this.initPromise = null;
   }
 
-  private async init(): Promise<void> {
+  /** Create a landmarker on `delegate`, via the injected factory in tests. */
+  private async buildLandmarker(
+    delegate: 'GPU' | 'CPU',
+  ): Promise<PoseLandmarkerInstance> {
+    if (this.options.createLandmarker !== undefined) {
+      return this.options.createLandmarker(delegate);
+    }
     const { FilesetResolver, PoseLandmarker } = await import(
       '@mediapipe/tasks-vision'
     );
     const vision = await FilesetResolver.forVisionTasks(this.options.wasmPath);
+    return PoseLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: this.options.modelAssetPath,
+        delegate,
+      },
+      runningMode: 'VIDEO',
+      numPoses: this.options.numPoses,
+    });
+  }
+
+  private async init(): Promise<void> {
+    // A fresh attempt clears a stale init failure: a model that failed
+    // to load once must not keep the hub reporting "failed" after a
+    // later attempt succeeds.
+    this.initError = null;
     try {
-      this.landmarker = await PoseLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: this.options.modelAssetPath,
-          delegate: this.options.delegate,
-        },
-        runningMode: 'VIDEO',
-        numPoses: this.options.numPoses,
-      });
+      this.landmarker = await this.buildLandmarker(this.options.delegate);
+      this.currentDelegate = this.options.delegate;
     } catch (error) {
       // GPU delegate fails on some devices/browsers — retry once on CPU
       // before surfacing the error. A CPU pose tracker is still playable.
       if (this.options.delegate === 'GPU' && !this.cpuFallbackTried) {
         this.cpuFallbackTried = true;
-        this.landmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: this.options.modelAssetPath,
-            delegate: 'CPU',
-          },
-          runningMode: 'VIDEO',
-          numPoses: this.options.numPoses,
-        });
+        this.landmarker = await this.buildLandmarker('CPU');
+        this.currentDelegate = 'CPU';
         return;
       }
       throw error;
     }
   }
 
+  /**
+   * Close the GPU landmarker and re-create it on the CPU delegate after
+   * `POSE.maxConsecutiveFailures` GPU inference failures. Async: while
+   * it runs, `frameAt()` keeps returning the last frame. A failed
+   * re-init is terminal — there is no delegate left to fall back to.
+   */
+  private reinitOnCpu(): Promise<void> {
+    if (this.reinitPromise !== null) {
+      return this.reinitPromise;
+    }
+    this.reinitPromise = (async () => {
+      try {
+        if (this.landmarker !== null) {
+          this.landmarker.close();
+          this.landmarker = null;
+        }
+        this.landmarker = await this.buildLandmarker('CPU');
+        this.currentDelegate = 'CPU';
+        // A successful recovery clears a stale init failure.
+        this.initError = null;
+      } catch (error) {
+        const failure =
+          error instanceof Error ? error : new Error(String(error));
+        this.lastInferenceError = failure;
+        this.initError = failure;
+        this.stopped = true;
+      } finally {
+        this.reinitPromise = null;
+      }
+    })();
+    return this.reinitPromise;
+  }
+
+  /**
+   * Track whether the video is actually advancing. Called on every
+   * `frameAt()` while the video is live. A paused video gets one
+   * best-effort `play()` retry per stall (a new stall starts when
+   * `currentTime` advances again).
+   */
+  private updateVideoLiveness(nowMs: number): void {
+    const video = this.options.video;
+    this.videoLive = true;
+    this.lastLivenessCheckMs = nowMs;
+    const currentTime = video.currentTime;
+    if (
+      this.lastVideoCurrentTime === null ||
+      currentTime !== this.lastVideoCurrentTime
+    ) {
+      this.lastVideoCurrentTime = currentTime;
+      this.lastVideoCurrentTimeChangeMs = nowMs;
+      // Time advanced: a new stall window, so a fresh play() retry is
+      // allowed if the video pauses again.
+      this.playRetryDone = false;
+    }
+    if (video.paused && !this.playRetryDone) {
+      this.playRetryDone = true;
+      try {
+        const playResult = video.play();
+        if (playResult !== undefined) {
+          void playResult.catch(() => {
+            // Best-effort resume: a rejection just means the video is
+            // still paused; the next stall window retries.
+          });
+        }
+      } catch {
+        // play() throwing synchronously is not fatal — inference keeps
+        // running on the last frame.
+      }
+    }
+  }
+
   public frameAt(nowMs: number): RawPoseFrame | null {
-    if (!this.started) return null;
+    if (!this.started || this.stopped) return this.lastFrame;
     if (this.landmarker === null) {
       // Still loading — no frame yet, not an error.
       return this.lastFrame;
+    }
+    const video = this.options.video;
+    if (video.readyState >= 2 && video.videoWidth > 0) {
+      this.updateVideoLiveness(nowMs);
     }
     if (nowMs - this.lastInferenceMs < this.options.inferenceMinIntervalMs) {
       return this.lastFrame;
     }
     this.lastInferenceMs = nowMs;
-    const video = this.options.video;
     if (video.readyState < 2 || video.videoWidth === 0) {
       return this.lastFrame;
     }
+    if (nowMs <= this.lastAttemptedTs) {
+      // MediaPipe VIDEO mode requires strictly increasing timestamps.
+      // The fixed-step loop calls frameAt() several times per rAF frame
+      // with the same nowMs on catch-up steps; a duplicate timestamp
+      // silently kills every inference after the first, so skip the call
+      // and keep the last frame.
+      return this.lastFrame;
+    }
+    this.lastAttemptedTs = nowMs;
     let landmarks: NormalizedLandmark[] | null = null;
     try {
       const result = this.landmarker.detectForVideo(video, nowMs);
@@ -193,12 +398,32 @@ export class MediaPipePoseSource implements PoseFrameSource {
           visibility: lm.visibility,
         }));
       }
-    } catch {
-      // A single failed inference (e.g. a torn frame) must not kill the
-      // game — keep the last good frame and try again next tick.
+    } catch (error) {
+      const failure =
+        error instanceof Error ? error : new Error(String(error));
+      this.lastInferenceError = failure;
+      this.failureCount += 1;
+      if (this.failureCount >= POSE.maxConsecutiveFailures) {
+        if (this.currentDelegate === 'GPU') {
+          // Failures against the fresh CPU landmarker count from zero.
+          // The re-init runs async; frameAt() keeps returning the last
+          // frame until it lands.
+          this.failureCount = 0;
+          void this.reinitOnCpu();
+        } else {
+          // CPU also failed maxConsecutiveFailures times: stop
+          // attempting inference and keep lastError for the HUD.
+          this.stopped = true;
+        }
+      }
       return this.lastFrame;
     }
     this.inferenceStats.record(nowMs);
+    this.failureCount = 0;
+    this.lastInferenceError = null;
+    // A successful inference proves the model is alive again: a stale
+    // init failure must not keep the hub reporting "model failed".
+    this.initError = null;
     this.lastFrame = {
       timestampMs: nowMs,
       landmarks,

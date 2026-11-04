@@ -24,9 +24,22 @@ export type ModelState =
   /** Camera source, landmarker ready. */
   | 'ready'
   /** Camera source, landmarker init failed (model/WASM did not load). */
-  | 'failed';
+  | 'failed'
+  /**
+   * Camera source, landmarker loaded but inference has stopped (repeated
+   * inference errors — Worker A's `inferenceStopped` flag). The model is
+   * not loading and not failed at init; it ran and then died, so the gate
+   * needs its own reason and message, not the init-failure one.
+   */
+  | 'inference-stopped';
 
-export type GateReason = 'open' | 'model-loading' | 'model-failed' | 'no-body';
+export type GateReason =
+  | 'open'
+  | 'model-loading'
+  | 'model-failed'
+  | 'no-body'
+  | 'stale-frame'
+  | 'inference-stopped';
 
 export interface GateState {
   /** True when the game must stay paused / must not start yet. */
@@ -44,12 +57,36 @@ export interface GateState {
 export interface GateOptions {
   /** Override for tests; defaults to `GATE.gracePeriodMs`. */
   gracePeriodMs?: number;
+  /**
+   * Age of the latest pose frame in ms, from the hub (nowMs minus the
+   * last inference frame's timestamp). When defined and above
+   * `GATE.staleFrameMs` the gate closes with 'stale-frame' — and that
+   * beats the grace period, so a frozen feed can never stay open via
+   * grace. Undefined means "unknown" and behavior is unchanged, so
+   * callers that cannot measure frame age (sim / replay) keep passing.
+   */
+  frameAgeMs?: number;
+  /**
+   * The last inference error message, when the source stopped with one.
+   * Shown (truncated) in the 'inference-stopped' message so a playtest
+   * can tell what died. Omit when the stop had no error attached.
+   */
+  inferenceError?: string;
+}
+
+/** Truncate a message to `maxChars`, with an ellipsis when cut. */
+function truncate(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
 /**
  * Decide the gate for one frame.
  *
- * - Model failed / loading: gated, regardless of body state.
+ * - Model failed / loading / inference-stopped: gated, regardless of body
+ *   state.
+ * - Stale frame (frameAgeMs > GATE.staleFrameMs): gated with
+ *   'stale-frame', regardless of body state and regardless of the grace
+ *   period — a frozen feed must never keep the game running.
  * - Body usable: open, and `lastUsableMs` advances to `nowMs`.
  * - Body not usable and never usable: gated immediately (a game started
  *   with no usable pose must not start its simulation).
@@ -78,6 +115,33 @@ export function evaluateGate(
       gated: true,
       reason: 'model-loading',
       message: 'Loading pose model…',
+      lastUsableMs,
+    };
+  }
+  if (modelState === 'inference-stopped') {
+    return {
+      gated: true,
+      reason: 'inference-stopped',
+      message:
+        options.inferenceError === undefined
+          ? 'Pose detection stopped — tap Retry'
+          : `Pose detection stopped — ${truncate(options.inferenceError, 60)}`,
+      lastUsableMs,
+    };
+  }
+
+  // A frozen feed closes the gate even when the last frame's body looked
+  // usable, and even inside the grace period: the Nov 4 playtest ran
+  // 142 s off one inference frame and never paused because nothing here
+  // checked the frame's age.
+  if (
+    options.frameAgeMs !== undefined &&
+    options.frameAgeMs > GATE.staleFrameMs
+  ) {
+    return {
+      gated: true,
+      reason: 'stale-frame',
+      message: 'Pose feed frozen — tap Retry',
       lastUsableMs,
     };
   }

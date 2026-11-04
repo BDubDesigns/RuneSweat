@@ -162,13 +162,101 @@ tests/builds never caught it. Fixes, all in this repo now:
   skeleton only. A separate "📷 Show Camera" button (`V` key) shows the
   video letterboxed for calibration; Debug (`D`) toggles only the HUD.
 - **Body-visible gate** (`src/core/gate.ts`, `GATE` in config):
-  `bodyUsable` requires shoulders + hips each individually visible
-  (≥ 0.5) and in frame; knees warn but don't block (`requireKnees:
-  false`). A game does not start its simulation until the gate opens;
-  losing the pose mid-game auto-pauses after a 500 ms grace (one dropped
-  frame never pauses). The DOM indicator is red "Step back — I can't see
-  your body" vs green "✅ Body found". The old inverted out-of-frame logic
-  (which hid the warning when there was no body at all) is gone.
+  `bodyUsable` requires shoulders + hips + knees each individually
+  visible (≥ 0.5) and in frame; knees became required in the Nov 4
+  Swing Lab freeze round (below) — they used to warn but not block
+  (`requireKnees: false`). A game does not start its simulation until
+  the gate opens; losing the pose mid-game auto-pauses after a 500 ms
+  grace (one dropped frame never pauses), and a pose frame older than
+  `GATE.staleFrameMs` (2000 ms) closes the gate even inside the grace
+  period. The DOM indicator is red "Step back — I can't see your body"
+  vs green "✅ Body found". The old inverted out-of-frame logic (which
+  hid the warning when there was no body at all) is gone.
+
+## Playtest failure — Nov 4, 2026, Swing Lab freeze
+
+Brandon playtested Swing Lab on his Pixel phone from the live GitHub
+Pages site. The debug HUD read: model LOADED, inference 0.0 Hz, frame
+age 142.2 s, 33 landmarks, body usable YES, knees hidden. Exactly ONE
+inference frame ever succeeded; the game ran off that stale frame for
+over two minutes and NEVER paused, even though he wasn't really in
+frame when it first claimed to see him.
+
+**What caused it (verified in code, not guessed):**
+
+- `evaluateGate` in `src/core/gate.ts` trusted `body.bodyUsable` with
+  no age check, and `main.ts` fed it `latestBody` forever — a frozen
+  feed looked exactly like a live one to the gate, so the grace period
+  never even came into play.
+- `bodyUsable` did not require knees (`GATE.requireKnees: false`), so
+  a partial body counted as "Body found" while the knees were hidden.
+- There was no model state for inference dying *after* a successful
+  load: `ModelState` only had loading / ready / failed, so a source
+  that loaded and then stopped inferring read as `ready` forever.
+- The HUD showed no inference-error count, no delegate, and no
+  video-freeze signal, so nothing on screen said "inference stopped".
+
+**What changed in this round (gate/HUD/docs layer):**
+
+- `GATE.staleFrameMs: 2000` — `evaluateGate` takes an optional
+  `frameAgeMs`; above the threshold the gate closes with new reason
+  `stale-frame` ("Pose feed frozen — tap Retry"), and staleness beats
+  the grace period. `frameAgeMs` undefined means behavior is unchanged
+  (sim / replay callers don't measure frame age).
+- `GATE.requireKnees: true` — `bodyUsable` now requires shoulders +
+  hips + knees EACH ≥ `minVisibility` (0.5). The grace period still
+  covers mid-game knee flicker.
+- New `ModelState` / `GateReason` `inference-stopped` (contract with
+  the source layer, which exposes `inferenceStopped` on
+  `MediaPipePoseSource`): the gate closes with "Pose detection stopped
+  — tap Retry", or the last inference error truncated to ~60 chars when
+  `GateOptions.inferenceError` is passed.
+- HUD (`src/debug/hud.ts`, optional fields so existing callers don't
+  break): inference error count + last error (~40 chars), delegate
+  (`GPU`/`CPU`), video-frozen flag, video `currentTime` age — next to
+  the existing fps / inference Hz / frame age / model / landmark lines.
+
+**What changed in this round (source layer + hub integration):**
+
+- `MediaPipePoseSource.frameAt` never calls `detectForVideo` with a
+  timestamp ≤ the last attempted one — it returns the last frame
+  instead. MediaPipe VIDEO mode requires strictly increasing
+  timestamps, and the fixed-step loop used to call `frameAt` once per
+  update step, i.e. several times per rendered frame with the same
+  `nowMs` on catch-up steps. This is the prime suspect for the freeze:
+  the first duplicate-timestamp throw was swallowed (see below), so
+  inference never succeeded again. The hub now also fetches a pose
+  frame once per rendered frame, in `render()` in `src/main.ts`, never
+  in `update()` — update steps share the frame render fetched.
+- Inference errors are counted, not swallowed: `lastError`,
+  `consecutiveFailures`, `delegateInUse`, `inferenceStopped` on the
+  source. After `POSE.maxConsecutiveFailures` (10) GPU failures the
+  source closes and re-creates the landmarker on CPU; if CPU also
+  fails 10 times, `inferenceStopped` is set and `frameAt` stops
+  attempting. `start()` resets the stopped state, so stop+start is
+  the way back.
+- `src/core/camera.ts` attaches the video element to the DOM hidden
+  (fixed, 1px, opacity 0, pointer-events none — never `display:none`,
+  which can itself pause playback) and detaches it on stop. The
+  source tracks `video.currentTime`: `videoFrozen` when it hasn't
+  advanced for `POSE.videoFrozenMs` (2000 ms), and it retries
+  `video.play()` best-effort once per stall when the video is paused.
+- Hub (`src/main.ts`): tracks the arrival time of the last distinct
+  frame and passes `frameAgeMs` + `inferenceError` into
+  `evaluateGate`; maps `inferenceStopped` to `ModelState`
+  `'inference-stopped'`; wires the new HUD fields from the source; a
+  "↻ Retry Camera" button (`#btn-retry`, enabled while the camera is
+  on) stops the old source + video and re-runs `startCameraSource`
+  from scratch — the picked game stays put, gated, until a fresh
+  usable body arrives.
+
+**Still untested on a real device:** whether inference keeps running
+on the Pixel through a full Swing Lab session (the duplicate-
+timestamp guard is the prime suspect for the freeze, but it is
+verified in code + fakes only — the Pixel retest is the proof); the real
+inference Hz and delegate in play; whether 2000 ms ever trips on a
+healthy feed; the swing thresholds (0.6 windup, 3.0 torso/s) against a
+real chop.
 
 ## Game 3 — Swing Lab (Active RuneSpace Mining prototype, Slice 1)
 
@@ -250,8 +338,12 @@ All in `src/core/config.ts`:
   height if a 5-year-old can't reach it. `SWING.cooldownMs` (700) — one
   swing = one hit; shorten only if the game feels sluggish between swings.
 - `GATE.gracePeriodMs` (500) — how long a lost pose is tolerated before
-  the game pauses. `GATE.requireKnees` (false) — set true only if games
-  ever need knees to be visible.
+  the game pauses. `GATE.requireKnees` (true) — knees are required for
+  full-body swing games; set false only if a game genuinely doesn't need
+  legs. `GATE.staleFrameMs` (2000) — a pose frame older than this closes
+  the gate ("Pose feed frozen") even inside the grace period; raise it
+  only if a healthy feed on the target device legitimately goes quiet
+  for longer.
 - `STAGE` (960×540) — the fixed game aspect. Do not tie it to video size.
 - `AUDIO.masterGain` (0.5) — volume.
 
@@ -282,3 +374,12 @@ Still untested on camera: swing thresholds (0.6 windup, 3.0 torso/s
 velocity), One-Euro lag at ~9 Hz inference, and adult vs 5-year-old
 differences. Render code (canvas drawing) is untested in Node — it
 typechecks and builds, but the first visual check needs a browser.
+
+**Swing Lab phone retest (after the Nov 4 freeze round):** the gate now
+pauses on a frozen feed ("Pose feed frozen — tap Retry") and requires
+knees visible, and the HUD shows inference errors + delegate + video
+freeze. Watch for: inference Hz staying above 0 through a full session
+(the Nov 4 freeze is still unexplained at the source layer — if it
+recurs, the HUD's error count / last error and the delegate line are
+the first things to read), and whether the 2000 ms staleness threshold
+ever trips while the feed is healthy.

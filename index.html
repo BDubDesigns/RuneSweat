@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Lara's Pose Games</title>
+  </head>
+  <body>
+    <!--
+      Lara's Pose Games — pose-arcade framework (PLAN.md).
+
+      Full-body skeleton pose games for a young child. The camera never
+      leaves the device: MediaPipe PoseLandmarker runs on-device, and the
+      only thing games ever see is a 33-point skeleton.
+
+      Mirroring rule: the canvas is never flipped with CSS `scaleX(-1)`.
+      Mirroring happens in code, in `toCanvas()` (src/render/stage.ts).
+    -->
+    <main id="app">
+      <header id="hub-header">
+        <h1>🪐 Lara's Pose Games</h1>
+        <p class="tagline">Move your body to play!</p>
+      </header>
+
+      <section id="hub" aria-label="Choose a game">
+        <button id="btn-camera" class="big-btn primary" type="button">
+          📷 Turn Camera On
+        </button>
+        <button id="btn-sim" class="big-btn" type="button">
+          🖱️ Play Without Camera
+        </button>
+        <p id="camera-status" class="status" role="status"></p>
+        <div id="game-cards" class="game-cards"></div>
+        <p class="hint">
+          Tip: stand back so your whole body fits in the camera, arms out wide!
+        </p>
+      </section>
+
+      <section id="stage-section" hidden>
+        <div class="stage-wrap">
+          <canvas id="stage"></canvas>
+          <div id="stun-banner" class="banner" hidden></div>
+        </div>
+        <div id="game-hud" class="game-hud" aria-live="polite"></div>
+        <div class="controls">
+          <button id="btn-pause" class="btn" type="button">⏸ Pause</button>
+          <button id="btn-restart" class="btn" type="button">↻ Restart</button>
+          <button id="btn-quit" class="btn" type="button">🏠 All Games</button>
+          <button id="btn-mute" class="btn" type="button">🔊 Sound On</button>
+          <button id="btn-debug" class="btn" type="button">🔍 Debug: Off</button>
+        </div>
+        <p id="out-of-frame" class="warning" hidden>
+          ⚠️ I can't see your whole body! Step back into the camera.
+        </p>
+      </section>
+
+      <footer id="legend">
+        <span class="k">move left / right to steer</span>
+        <span class="k">raise an arm to shoot</span>
+        <span class="k">lower it to reload</span>
+        <span class="k">no camera: hold left click = left arm, right click = right arm, Q/E = angled arms</span>
+        <span class="k"><kbd>D</kbd> debug HUD</span>
+        <span class="k"><kbd>M</kbd> mute</span>
+      </footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

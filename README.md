@@ -9,7 +9,7 @@ goes to an on-device MediaPipe PoseLandmarker and nowhere else.
 ## Quick start
 
 ```bash
-npm ci                 # install pinned deps
+npm ci --legacy-peer-deps  # plain `npm ci` fails on vitest peer deps
 npm run download-model # fetch the pose model (~6 MB lite + ~13 MB full) + copy WASM
 npm run dev            # http://localhost:5173
 ```

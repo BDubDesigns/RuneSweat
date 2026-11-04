@@ -17,7 +17,7 @@
  *   and an adult, near and far from the camera.
  */
 
-import { BODY, POSE } from './config';
+import { BODY, GATE, POSE, SWING } from './config';
 import { OneEuroFilter, OneEuroFilter2D } from './oneEuro';
 import {
   PoseLandmark,
@@ -47,12 +47,65 @@ export interface ArmState {
   lengthTorsoFrac: number;
 }
 
+/** Per-landmark visibility (0..1) for the joints the gate + HUD care about. */
+export interface LandmarkVisibility {
+  leftShoulder: number;
+  rightShoulder: number;
+  leftHip: number;
+  rightHip: number;
+  leftKnee: number;
+  rightKnee: number;
+}
+
+/** A body state with no person detected (all visibilities zero). */
+function absentVisibility(): LandmarkVisibility {
+  return {
+    leftShoulder: 0,
+    rightShoulder: 0,
+    leftHip: 0,
+    rightHip: 0,
+    leftKnee: 0,
+    rightKnee: 0,
+  };
+}
+
 /** The game's view of the body in one frame. */
 export interface BodyState {
   /** A person was detected in this frame. */
   present: boolean;
   /** Torso is confidently seen and inside the frame margins. */
   inFrame: boolean;
+  /**
+   * Usable full-body pose: present AND in frame AND shoulders + hips each
+   * individually at or above `GATE.minVisibility` (the mean
+   * `visibilityScore` can hide one bad landmark). Knees are required only
+   * when `GATE.requireKnees` is true (false in v1 — see config). This is
+   * what the body-visible gate runs on.
+   */
+  bodyUsable: boolean;
+  /** Per-landmark visibility for shoulders / hips / knees. */
+  landmarkVisibility: LandmarkVisibility;
+  /** Both knees confidently visible (informational when requireKnees is false). */
+  kneesVisible: boolean;
+  /** Smoothed shoulder-midpoint y, video space [0,1]. Windup / strike
+   *  lines are measured from here (wrist height above/below the shoulders).
+   */
+  shoulderY: number;
+  /** Smoothed wrist positions, video space [0,1]. */
+  leftWristX: number;
+  rightWristX: number;
+  leftWristY: number;
+  rightWristY: number;
+  /**
+   * Smoothed vertical wrist velocity, normalized units/sec. Positive =
+   * moving DOWN in video space (y grows downward). Derived from the
+   * frame-to-frame change of the smoothed wrist Y over timestamp deltas,
+   * lightly smoothed with an EMA (`SWING.wristVelEmaAlpha`). Games read
+   * this (divided by `torsoLength`) for swing detection — never raw
+   * landmarks.
+   */
+  leftWristVelY: number;
+  rightWristVelY: number;
   /** Smoothed hip-midpoint x, video space [0,1]. Drives the ship. */
   torsoX: number;
   /** Smoothed hip-midpoint y, video space [0,1]. */
@@ -272,13 +325,73 @@ export class BodyStateTracker {
     beta: BODY.oneEuroBeta,
     dCutoff: BODY.oneEuroDCutoff,
   });
+  private readonly shoulderYFilter = new OneEuroFilter({
+    minCutoff: BODY.oneEuroMinCutoff,
+    beta: BODY.oneEuroBeta,
+    dCutoff: BODY.oneEuroDCutoff,
+  });
+  private readonly leftWristFilter = new OneEuroFilter2D({
+    minCutoff: BODY.oneEuroMinCutoff,
+    beta: BODY.oneEuroBeta,
+    dCutoff: BODY.oneEuroDCutoff,
+  });
+  private readonly rightWristFilter = new OneEuroFilter2D({
+    minCutoff: BODY.oneEuroMinCutoff,
+    beta: BODY.oneEuroBeta,
+    dCutoff: BODY.oneEuroDCutoff,
+  });
   private hipBaselineY: number | null = null;
+  /** Previous smoothed wrist Y + shared timestamp, for velocity. */
+  private prevLeftWristY: number | null = null;
+  private prevRightWristY: number | null = null;
+  private prevWristTSeconds: number | null = null;
+  /** Current EMA-smoothed wrist velocities (normalized units/sec). */
+  private leftWristVelY = 0;
+  private rightWristVelY = 0;
 
   public reset(): void {
     this.torsoFilter.reset();
     this.leftAngleFilter.reset();
     this.rightAngleFilter.reset();
     this.hipBaselineY = null;
+    this.resetWristTracking();
+  }
+
+  /**
+   * Clear all wrist-tracking state. Called on reset() and whenever a frame
+   * has no usable pose, so a reappearing body cannot compute a giant
+   * velocity from a stale previous wrist position.
+   */
+  private resetWristTracking(): void {
+    this.shoulderYFilter.reset();
+    this.leftWristFilter.reset();
+    this.rightWristFilter.reset();
+    this.prevLeftWristY = null;
+    this.prevRightWristY = null;
+    this.prevWristTSeconds = null;
+    this.leftWristVelY = 0;
+    this.rightWristVelY = 0;
+  }
+
+  /**
+   * One wrist's vertical velocity for this frame, from the change in its
+   * smoothed Y since the previous frame over the timestamp delta, lightly
+   * smoothed with an EMA. First frame, a repeated timestamp, or a gap
+   * over 0.5 s (tab backgrounded) re-baselines at velocity 0 — there is
+   * no trustworthy delta in those cases.
+   */
+  private wristVelocity(
+    prevY: number | null,
+    prevVel: number,
+    ySm: number,
+    tSeconds: number,
+  ): number {
+    if (prevY === null || this.prevWristTSeconds === null) return 0;
+    const dt = tSeconds - this.prevWristTSeconds;
+    if (dt <= 0 || dt > 0.5) return 0;
+    const raw = (ySm - prevY) / dt;
+    const alpha = SWING.wristVelEmaAlpha;
+    return alpha * raw + (1 - alpha) * prevVel;
   }
 
   /**
@@ -289,9 +402,20 @@ export class BodyStateTracker {
   public update(frame: RawPoseFrame | null): BodyState {
     const timestampMs = frame?.timestampMs ?? 0;
     if (frame === null || frame.landmarks === null) {
+      this.resetWristTracking();
       return {
         present: false,
         inFrame: false,
+        bodyUsable: false,
+        landmarkVisibility: absentVisibility(),
+        kneesVisible: false,
+        shoulderY: 0.5,
+        leftWristX: 0.5,
+        rightWristX: 0.5,
+        leftWristY: 0.5,
+        rightWristY: 0.5,
+        leftWristVelY: 0,
+        rightWristVelY: 0,
         torsoX: 0.5,
         torsoY: 0.5,
         torsoLength: 0,
@@ -321,9 +445,20 @@ export class BodyStateTracker {
       lw === undefined || rw === undefined || lk === undefined || rk === undefined ||
       la === undefined || ra === undefined
     ) {
+      this.resetWristTracking();
       return {
         present: false,
         inFrame: false,
+        bodyUsable: false,
+        landmarkVisibility: absentVisibility(),
+        kneesVisible: false,
+        shoulderY: 0.5,
+        leftWristX: 0.5,
+        rightWristX: 0.5,
+        leftWristY: 0.5,
+        rightWristY: 0.5,
+        leftWristVelY: 0,
+        rightWristVelY: 0,
         torsoX: 0.5,
         torsoY: 0.5,
         torsoLength: 0,
@@ -352,6 +487,28 @@ export class BodyStateTracker {
 
     const tSeconds = timestampMs / 1000;
     const torso = this.torsoFilter.filter(hipMid.x, hipMid.y, tSeconds);
+    const shoulderY = this.shoulderYFilter.filter(shoulderMid.y, tSeconds);
+
+    // Wrist positions (smoothed) + vertical velocities. Velocity is the
+    // frame-to-frame change of the SMOOTHED wrist Y over the timestamp
+    // delta — raw landmark jitter would spike a velocity taken from raw Y.
+    const leftWristSm = this.leftWristFilter.filter(lw.x, lw.y, tSeconds);
+    const rightWristSm = this.rightWristFilter.filter(rw.x, rw.y, tSeconds);
+    this.leftWristVelY = this.wristVelocity(
+      this.prevLeftWristY,
+      this.leftWristVelY,
+      leftWristSm.y,
+      tSeconds,
+    );
+    this.rightWristVelY = this.wristVelocity(
+      this.prevRightWristY,
+      this.rightWristVelY,
+      rightWristSm.y,
+      tSeconds,
+    );
+    this.prevLeftWristY = leftWristSm.y;
+    this.prevRightWristY = rightWristSm.y;
+    this.prevWristTSeconds = tSeconds;
 
     // Standing baseline: slow EMA, updated only while the hips are near it
     // and both ankles are visible — a jump or duck must not drag it along.
@@ -383,9 +540,41 @@ export class BodyStateTracker {
       torso.x > POSE.inFrameMarginX &&
       torso.x < 1 - POSE.inFrameMarginX;
 
+    // Each of the four torso landmarks must be individually confident —
+    // a mean can hide one shoulder/hip the model barely sees. Knees only
+    // gate when GATE.requireKnees is true (false in v1).
+    const landmarkVisibility: LandmarkVisibility = {
+      leftShoulder: ls.visibility ?? 0,
+      rightShoulder: rs.visibility ?? 0,
+      leftHip: lh.visibility ?? 0,
+      rightHip: rh.visibility ?? 0,
+      leftKnee: lk.visibility ?? 0,
+      rightKnee: rk.visibility ?? 0,
+    };
+    const kneesVisible =
+      landmarkVisibility.leftKnee >= GATE.minVisibility &&
+      landmarkVisibility.rightKnee >= GATE.minVisibility;
+    const bodyUsable =
+      inFrame &&
+      landmarkVisibility.leftShoulder >= GATE.minVisibility &&
+      landmarkVisibility.rightShoulder >= GATE.minVisibility &&
+      landmarkVisibility.leftHip >= GATE.minVisibility &&
+      landmarkVisibility.rightHip >= GATE.minVisibility &&
+      (!GATE.requireKnees || kneesVisible);
+
     return {
       present: true,
       inFrame,
+      bodyUsable,
+      landmarkVisibility,
+      kneesVisible,
+      shoulderY,
+      leftWristX: leftWristSm.x,
+      rightWristX: rightWristSm.x,
+      leftWristY: leftWristSm.y,
+      rightWristY: rightWristSm.y,
+      leftWristVelY: this.leftWristVelY,
+      rightWristVelY: this.rightWristVelY,
       torsoX: torso.x,
       torsoY: torso.y,
       torsoLength,

@@ -8,23 +8,116 @@
  */
 
 import { RENDER } from '../core/config';
-import { toCanvas, type Vec2 } from './stage';
+import { letterboxRect, toCanvas, type Vec2 } from './stage';
 import {
   PoseLandmark,
   SKELETON_CONNECTIONS,
   type NormalizedLandmark,
 } from '../tracking/poseTypes';
 
-/** Draw the video frame mirrored, filling the canvas. */
+/**
+ * Draw the video frame mirrored, letterboxed into the stage preserving its
+ * aspect ratio — never stretched. The stage background is filled first so
+ * the pillarbox/letterbox bars match the stage, not the page.
+ */
 export function drawVideoMirrored(
   ctx: CanvasRenderingContext2D,
   video: HTMLVideoElement,
   width: number,
   height: number,
 ): void {
+  drawStageBackground(ctx, width, height);
+  const rect = letterboxRect(video.videoWidth, video.videoHeight, width, height);
   ctx.save();
-  ctx.setTransform(-1, 0, 0, 1, width, 0);
-  ctx.drawImage(video, 0, 0, width, height);
+  // Mirror within the letterbox rect: x maps rect.x -> rect.x + rect.width
+  // reversed, y passes through unchanged.
+  ctx.setTransform(-1, 0, 0, 1, 2 * rect.x + rect.width, 0);
+  ctx.drawImage(video, rect.x, rect.y, rect.width, rect.height);
+  ctx.restore();
+}
+
+export interface BlockingOverlayOptions {
+  /** Big headline, e.g. "Step back — I can't see your body". */
+  title: string;
+  /** Smaller second line (may be empty). */
+  subtitle: string;
+  /**
+   * Draw the framing ghost: a stickman outline centred on the stage
+   * showing where shoulders/hips should be. Off for the model-failure
+   * overlay, where framing is not the problem.
+   */
+  showGhost: boolean;
+}
+
+/**
+ * Blocking overlay: dim the stage, show a big kid-readable message, and
+ * optionally a framing ghost. Drawn after the game so it sits on top of
+ * everything except the debug HUD.
+ */
+export function drawBlockingOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  options: BlockingOverlayOptions,
+): void {
+  ctx.save();
+  ctx.fillStyle = 'rgba(11, 11, 18, 0.78)';
+  ctx.fillRect(0, 0, width, height);
+
+  if (options.showGhost) {
+    const cx = width / 2;
+    const top = height * 0.16;
+    const scale = height * 0.62;
+    ctx.strokeStyle = 'rgba(232, 232, 240, 0.85)';
+    ctx.fillStyle = 'rgba(232, 232, 240, 0.85)';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    // Head.
+    ctx.beginPath();
+    ctx.arc(cx, top + scale * 0.07, scale * 0.07, 0, Math.PI * 2);
+    ctx.stroke();
+    // Torso: shoulders -> hips.
+    const shoulderY = top + scale * 0.2;
+    const hipY = top + scale * 0.55;
+    ctx.beginPath();
+    ctx.moveTo(cx, shoulderY);
+    ctx.lineTo(cx, hipY);
+    ctx.stroke();
+    // Arms out wide, legs apart — the pose the gate wants to see.
+    const shoulderHalf = scale * 0.16;
+    const hipHalf = scale * 0.1;
+    ctx.beginPath();
+    ctx.moveTo(cx - shoulderHalf, shoulderY);
+    ctx.lineTo(cx + shoulderHalf, shoulderY);
+    ctx.moveTo(cx - hipHalf, hipY);
+    ctx.lineTo(cx - hipHalf * 1.4, top + scale);
+    ctx.moveTo(cx + hipHalf, hipY);
+    ctx.lineTo(cx + hipHalf * 1.4, top + scale);
+    ctx.stroke();
+    // Joint dots at shoulders + hips.
+    for (const [x, y] of [
+      [cx - shoulderHalf, shoulderY],
+      [cx + shoulderHalf, shoulderY],
+      [cx - hipHalf, hipY],
+      [cx + hipHalf, hipY],
+    ] as const) {
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const titleY = options.showGhost ? height * 0.86 : height * 0.44;
+  ctx.font = `700 34px ${RENDER.gameFont}`;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(options.title, width / 2, titleY);
+  if (options.subtitle !== '') {
+    ctx.font = `24px ${RENDER.gameFont}`;
+    ctx.fillStyle = '#e8e8f0';
+    ctx.fillText(options.subtitle, width / 2, titleY + 44);
+  }
   ctx.restore();
 }
 

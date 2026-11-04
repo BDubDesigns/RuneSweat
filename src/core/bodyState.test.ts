@@ -10,6 +10,7 @@ import {
   type PoseTarget,
 } from './bodyState';
 import { makeFrame, makePose } from './poseFixture';
+import { PoseLandmark } from '../tracking/poseTypes';
 import type { NormalizedLandmark } from '../tracking/poseTypes';
 
 function lm(x: number, y: number): NormalizedLandmark {
@@ -138,6 +139,75 @@ describe('BodyStateTracker', () => {
     const state = tracker.update(makeFrame(makePose({ torsoX: 0.02 }), 1000));
     expect(state.present).toBe(true);
     expect(state.inFrame).toBe(false);
+  });
+});
+
+describe('BodyStateTracker bodyUsable', () => {
+  it('is usable when shoulders + hips are all confidently visible', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(makePose({}), 1000));
+    expect(state.present).toBe(true);
+    expect(state.inFrame).toBe(true);
+    expect(state.bodyUsable).toBe(true);
+    expect(state.visibilityScore).toBeCloseTo(0.99, 2);
+    expect(state.landmarkVisibility.leftShoulder).toBeCloseTo(0.99, 2);
+    expect(state.kneesVisible).toBe(true);
+  });
+
+  it('is not usable when one shoulder is invisible, even if the mean hides it', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      visibilityOverrides: { [PoseLandmark.LEFT_SHOULDER]: 0.1 },
+    });
+    const state = tracker.update(makeFrame(pose, 1000));
+    // Mean visibility is still (0.1 + 0.99*3)/4 = 0.77 — the mean alone
+    // would call this usable. The per-landmark check must not.
+    expect(state.visibilityScore).toBeGreaterThan(0.5);
+    expect(state.bodyUsable).toBe(false);
+    expect(state.landmarkVisibility.leftShoulder).toBeCloseTo(0.1, 2);
+  });
+
+  it('is not usable when one hip is invisible', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      visibilityOverrides: { [PoseLandmark.RIGHT_HIP]: 0.2 },
+    });
+    const state = tracker.update(makeFrame(pose, 1000));
+    expect(state.bodyUsable).toBe(false);
+  });
+
+  it('is not usable when there is no frame at all', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(null, 1000));
+    expect(state.present).toBe(false);
+    expect(state.bodyUsable).toBe(false);
+    expect(state.visibilityScore).toBe(0);
+  });
+
+  it('is not usable when the torso is out of frame', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(makePose({ torsoX: 0.02 }), 1000));
+    expect(state.inFrame).toBe(false);
+    expect(state.bodyUsable).toBe(false);
+  });
+
+  it('is still usable when knees are missing (requireKnees is false in v1)', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      visibilityOverrides: {
+        [PoseLandmark.LEFT_KNEE]: 0.1,
+        [PoseLandmark.RIGHT_KNEE]: 0.1,
+      },
+    });
+    const state = tracker.update(makeFrame(pose, 1000));
+    expect(state.kneesVisible).toBe(false);
+    expect(state.bodyUsable).toBe(true);
+  });
+
+  it('is not usable when every torso landmark is low-visibility', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(makePose({ visibility: 0.2 }), 1000));
+    expect(state.bodyUsable).toBe(false);
   });
 });
 

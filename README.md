@@ -23,14 +23,21 @@ jump, `S` duck. `?source=replay` plays a recorded clip instead.
 
 ## The games
 
-- **Space Invaders** — move your body to fly the ship. Raise either arm
-  to shoot a missile in the direction your arm points (straight up only
-  if your arm is straight up). Lower your arm to reload. Enemies shoot
-  back slowly; each level gets a little faster.
-- **Dance Pose Drop** — a stickman in a pose falls from the sky. Copy
-  the pose when it lands in your zone. Perfect / Good / Miss.
+- **Swing Lab** — Active RuneSpace Mining prototype. Raise both arms overhead, then chop down fast like a pickaxe: the ore node cracks, +1 ore, +10 Mining XP. Five hits break the node and a new one spawns. Single-arm swings count too. Half-swings say "Swing bigger!" / "Swing faster!" instead of hitting.
+- **Space Invaders** — move your body to fly the ship. Raise either arm to shoot a missile in the direction your arm points (straight up only if your arm is straight up). Lower your arm to reload. Enemies shoot back slowly; each level gets a little faster.
+- **Dance Pose Drop** — a stickman in a pose falls from the sky. Copy the pose when it lands in your zone. Perfect / Good / Miss.
 - **Auto Runner** — coming soon (lane switching, jump, duck).
 - **Lumberjack** — vision only, see `docs/vision-lumberjack.md`.
+
+## Playing on a phone (GitHub Pages)
+
+Open the Pages link, tap **Turn Camera On**, stand back so head-to-knees fit in frame, and wait for the green **"✅ Body found"** indicator — the game will not start until it can see your body, and it pauses itself if you step out of frame.
+
+**You won't see yourself on screen** — you see the game and your skeleton only. The camera video is hidden by default; the **"📷 Show Camera"** button (or `V`) shows it letterboxed for calibration. The game stage is a fixed 16:9 landscape frame whatever shape your phone's camera is, so the video never stretches.
+
+If the game says **"Pose model failed to load"**, the pose model didn't download — check your connection and reload. The debug HUD (`🔍 Debug` / `D`) shows model status, inference Hz, and body visibility, so a bad playtest can be told apart: model didn't load vs body not seen vs game logic wrong.
+
+Mouse-sim (no camera): `?source=mouse`, hold **A+D** (or both mouse buttons) ~0.5s to wind up, release both at once to strike. Single arm works too (just A).
 
 ## How it works
 

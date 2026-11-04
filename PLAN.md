@@ -122,6 +122,87 @@ ankle, 28 right ankle, 29-32 feet.
   target joint angles come from `jointAngles(template)` — the drawing and
   the scoring can never disagree.
 
+## Playtest failure — Nov 4, 2026, and the framework fixes
+
+Brandon playtested Space Invaders on his Pixel phone (front camera,
+portrait) from the live GitHub Pages site: body never detected, Game Over,
+score 0, ship never moved, arms never fired.
+
+**First diagnosis: wrong.** The screenshots looked like a selfie close-up,
+so the first theory was "face only, no hips/knees in frame". Brandon
+corrected it the same day: he WAS fully in frame; the screenshots showed
+the stretching, not his framing. That theory is dead and appears nowhere
+in code or copy.
+
+**Real root cause: a base-path bug.** The code loaded the pose model and
+WASM from absolute paths (`/models/...`, `/wasm`). On GitHub Pages the app
+lives at `/lara-pose-games/`, so `/models` resolves to the domain root and
+404s (verified: 404 at `bdubdesigns.github.io/models/...`, 200 under
+`/lara-pose-games/models/...`). PoseLandmarker never loaded on the live
+site — no pose frames ever — while localhost at root worked fine, so
+tests/builds never caught it. Fixes, all in this repo now:
+
+- `src/core/assetUrl.ts`: `assetUrl(rel)` joins
+  `import.meta.env.BASE_URL` (Vite base `'./'`). Model + WASM paths are
+  base-relative (`./models/...`, `./wasm`); a test asserts no leading-slash
+  asset path is used for model/WASM. A repo-wide search found no other
+  absolute asset paths.
+- A model-load failure is a loud blocking overlay on stage ("Pose model
+  failed to load — check your connection and reload"), not a hub status
+  line. The game cannot start while it shows.
+- Debug HUD + gate screen show pose diagnostics (model LOADED yes/no,
+  inference Hz, last frame age, landmark count, `bodyUsable`,
+  per-landmark visibility), so the next playtest can distinguish
+  "model didn't load" from "body not seen" from "game logic wrong".
+- **Fixed landscape stage:** `STAGE = 960×540` in config; the canvas
+  backing store is always that size, never the video's intrinsic size.
+  Video (debug only) is drawn letterboxed via `letterboxRect`, never
+  stretched; `.stage-wrap` is 16:9.
+- **Video hidden by default:** normal play shows stage background +
+  skeleton only. A separate "📷 Show Camera" button (`V` key) shows the
+  video letterboxed for calibration; Debug (`D`) toggles only the HUD.
+- **Body-visible gate** (`src/core/gate.ts`, `GATE` in config):
+  `bodyUsable` requires shoulders + hips each individually visible
+  (≥ 0.5) and in frame; knees warn but don't block (`requireKnees:
+  false`). A game does not start its simulation until the gate opens;
+  losing the pose mid-game auto-pauses after a 500 ms grace (one dropped
+  frame never pauses). The DOM indicator is red "Step back — I can't see
+  your body" vs green "✅ Body found". The old inverted out-of-frame logic
+  (which hid the warning when there was no body at all) is gone.
+
+## Game 3 — Swing Lab (Active RuneSpace Mining prototype, Slice 1)
+
+- One ore node, one mechanic: a pickaxe swing is a hit. Raise both arms
+  overhead (windup), chop down fast through chest level (strike). The
+  miner is the player's live skeleton + a pickaxe anchored at the wrists
+  (plus a hard hat). Single-arm overhead swings count too; two-handed is
+  still one hit, not two.
+- State machine (`src/games/swing-lab/swingMachine.ts`, pure and tested):
+  Ready → Windup → Strike → Recover → Ready. A hit needs the full arc:
+  windup height reached AND peak downward wrist velocity above threshold
+  AND wrists crossing the chest line. Cooldown 700 ms (`SWING.cooldownMs`)
+  so one swing = one hit. Weak swings give feedback, not a hit:
+  "Swing bigger!" (didn't reach windup height) / "Swing faster!"
+  (reached windup but dropped slowly), 300 ms re-arm.
+- On a hit: node cracks (stages), +1 ore, +10 Mining XP, hit sound +
+  screen shake. 5 hits break the node (sparkle, win sound, new node).
+  Mining level = floor(XP/100)+1, starting at level 1.
+- Wrist tracking lives in `BodyState` (`left/rightWristY`,
+  `left/rightWristVelY` in normalized units/sec, positive = down,
+  One-Euro-smoothed + EMA, re-baselined on gaps / lost body) — the swing
+  machine reads `BodyState` only, never landmarks.
+- Live feedback: swing meter, phase name, "last swing" line, wrist
+  velocity in the HUD. Mouse-sim: hold A+D (or both mouse buttons) ~0.5 s,
+  release both at once to strike.
+- SWING thresholds (all in `config.ts`): windup 0.6 torso lengths above
+  the shoulder, strike line 0.5 below the shoulder (chest level), strike
+  velocity 3.0 torso lengths/sec (measured: mouse-sim drop peaks ~7.8,
+  a slow 1.5 s lower reads ~1.4). No elbow-extension requirement — a
+  bent-arm swing from a 5-year-old still counts.
+- Lara games are PARKED (Brandon, Nov 4): Swing Lab is the Active
+  RuneSpace first slice, not a Lara game. Space Invaders / Dance Drop are
+  still in the hub and still work, but no new work goes into them.
+
 ## Not in v1 (documented only)
 
 ### Auto Runner (stub + design note)
@@ -163,6 +244,15 @@ All in `src/core/config.ts`:
 - `DANCE.matchThreshold` (0.72) / `perfectThreshold` (0.88) — how strict
   pose matching is. Lower `matchThreshold` first if poses feel
   unmatchable.
+- `SWING.strikeVelocityTorsoFracPerSec` (3.0) / `windupHeightTorsoFrac`
+  (0.6) — the two swing numbers to tune first after a phone playtest.
+  Lower the velocity if real chops don't register; lower the windup
+  height if a 5-year-old can't reach it. `SWING.cooldownMs` (700) — one
+  swing = one hit; shorten only if the game feels sluggish between swings.
+- `GATE.gracePeriodMs` (500) — how long a lost pose is tolerated before
+  the game pauses. `GATE.requireKnees` (false) — set true only if games
+  ever need knees to be visible.
+- `STAGE` (960×540) — the fixed game aspect. Do not tie it to video size.
 - `AUDIO.masterGain` (0.5) — volume.
 
 ## Quality gates (same as the Spider-Man repo)
@@ -181,3 +271,14 @@ for a 5-year-old's arms, ship responsiveness, inference Hz on-device,
 whether the lite model holds her in frame while she moves fast, and
 whether the dance poses read as fun or frustrating. Tune from
 `config.ts` after that session — that's what it's for.
+
+**Swing Lab phone test (Brandon, first):** stand back so head-to-knees
+fit in frame; wait for the green "✅ Body found" indicator. Raise both
+arms straight overhead (meter fills gold, "Now SWING DOWN!"), then chop
+down fast. A hit cracks the node, +1 ore, +10 XP. Five hits break the
+node; ten hits reach Mining Lv 2. "Swing bigger!" = wrists didn't reach
+windup height; "Swing faster!" = dropped slowly instead of chopping.
+Still untested on camera: swing thresholds (0.6 windup, 3.0 torso/s
+velocity), One-Euro lag at ~9 Hz inference, and adult vs 5-year-old
+differences. Render code (canvas drawing) is untested in Node — it
+typechecks and builds, but the first visual check needs a browser.

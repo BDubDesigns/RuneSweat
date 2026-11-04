@@ -24,12 +24,12 @@
  *    top passes the zone's bottom), which is also when it can no longer
  *    be scored.
  * 2. Canvas size. `update()` gets no canvas, so the playfield height is
- *    cached from `render()` (which runs every frame) with `SOURCE` as
+ *    cached from `render()` (which runs every frame) with `STAGE` as
  *    the fallback before the first render. The canvas is a fixed size in
  *    practice, so the cached value is stable.
  */
 
-import { BODY, DANCE, RENDER, SOURCE } from '../../core/config';
+import { BODY, DANCE, RENDER, STAGE } from '../../core/config';
 import { poseMatchScore } from '../../core/bodyState';
 import type { SoundEffects } from '../../core/audio';
 import type { BodyState } from '../../core/bodyState';
@@ -151,7 +151,7 @@ export class DanceDropGame implements Game {
   private missCount = 0;
   private feedback: { text: string; kind: RoundGrade; untilMs: number } | null =
     null;
-  private canvasHeight: number = SOURCE.height;
+  private canvasHeight: number = STAGE.height;
 
   public constructor(sfx: SoundEffects) {
     this.sfx = sfx;

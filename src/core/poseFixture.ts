@@ -31,6 +31,12 @@ export interface SyntheticPoseOptions {
   /** Knee bend for duck detection: 0 = straight legs, 1 = deep squat. */
   kneeBend?: number;
   visibility?: number;
+  /**
+   * Per-landmark visibility overrides, keyed by PoseLandmark index —
+   * e.g. `{ [PoseLandmark.LEFT_SHOULDER]: 0.1 }` to hide one shoulder
+   * while the rest stay confident. Applied after the global `visibility`.
+   */
+  visibilityOverrides?: Partial<Record<number, number>>;
 }
 
 function lm(x: number, y: number, visibility: number): NormalizedLandmark {
@@ -113,6 +119,10 @@ export function makePose(options: SyntheticPoseOptions = {}): NormalizedLandmark
   landmarks[PoseLandmark.RIGHT_HEEL] = lm(torsoX + hipHalf + 0.01, ankleY, visibility);
   landmarks[PoseLandmark.LEFT_FOOT_INDEX] = lm(torsoX - hipHalf + 0.02, ankleY + 0.01, visibility);
   landmarks[PoseLandmark.RIGHT_FOOT_INDEX] = lm(torsoX + hipHalf - 0.02, ankleY + 0.01, visibility);
+  for (const [index, vis] of Object.entries(options.visibilityOverrides ?? {})) {
+    const lmEntry = landmarks[Number(index)];
+    if (lmEntry !== undefined && vis !== undefined) lmEntry.visibility = vis;
+  }
   return landmarks;
 }
 

@@ -20,6 +20,7 @@
  */
 
 import { POSE } from '../core/config';
+import { assetUrl } from '../core/assetUrl';
 import type {
   NormalizedLandmark,
   PoseFrameSource,
@@ -29,9 +30,14 @@ import type { PoseLandmarker } from '@mediapipe/tasks-vision';
 
 export interface MediaPipePoseSourceOptions {
   video: HTMLVideoElement;
-  /** e.g. `/models/pose_landmarker_lite.task` (served from public/). */
+  /**
+   * e.g. `./models/pose_landmarker_lite.task` (served from public/).
+   * Base-relative, never a leading-slash absolute path: the app is hosted
+   * under a subpath on GitHub Pages, where `/models/...` 404s at the
+   * domain root and the landmarker silently never loads.
+   */
   modelAssetPath: string;
-  /** e.g. `/wasm` (served from public/). */
+  /** e.g. `./wasm` (served from public/). Base-relative, same reason. */
   wasmPath: string;
   delegate: 'GPU' | 'CPU';
   numPoses: number;
@@ -91,6 +97,20 @@ export class MediaPipePoseSource implements PoseFrameSource {
 
   public get ready(): boolean {
     return this.landmarker !== null;
+  }
+
+  /**
+   * Diagnostics for the debug HUD / gate screen: timestamp of the last
+   * inference frame, and how many landmarks it carried (33 when a person
+   * was detected, 0 when none was). Lets a playtest tell "model didn't
+   * load" from "body not seen" from "body seen, game wrong".
+   */
+  public get lastFrameTimestampMs(): number | null {
+    return this.lastFrame === null ? null : this.lastFrame.timestampMs;
+  }
+
+  public get lastLandmarkCount(): number {
+    return this.lastFrame?.landmarks?.length ?? 0;
   }
 
   public start(nowMs: number): void {
@@ -189,7 +209,9 @@ export class MediaPipePoseSource implements PoseFrameSource {
   }
 }
 
-/** Default options from config.ts (the SSOT). */
+/** Default options from config.ts (the SSOT). Paths are base-relative via
+ * `assetUrl` — never leading-slash absolute — so they resolve under the
+ * app's subpath on GitHub Pages as well as at the localhost root. */
 export function defaultMediaPipeOptions(
   video: HTMLVideoElement,
 ): MediaPipePoseSourceOptions {
@@ -197,8 +219,8 @@ export function defaultMediaPipeOptions(
     POSE.variant === 'full' ? POSE.fullModelFile : POSE.liteModelFile;
   return {
     video,
-    modelAssetPath: `/models/${modelFile}`,
-    wasmPath: POSE.wasmPath,
+    modelAssetPath: assetUrl(`models/${modelFile}`),
+    wasmPath: assetUrl(POSE.wasmPath),
     delegate: POSE.delegate,
     numPoses: POSE.numPoses,
     inferenceMinIntervalMs: POSE.inferenceMinIntervalMs,

@@ -60,9 +60,10 @@ export interface CanvasBackingStore {
 }
 
 /**
- * The canvas backing store equals the source's intrinsic dimensions.
- * Normalized -> canvas then stays a pure multiply, and there is no
- * letterboxing inside the canvas. Viewport fitting is CSS only.
+ * The canvas backing store equals the size the caller passes — in the hub
+ * that is always the fixed `STAGE` size, never the video's intrinsic
+ * dimensions. Normalized -> canvas then stays a pure multiply, and there is
+ * no letterboxing inside the canvas. Viewport fitting is CSS only.
  * Returns `true` when the store was resized.
  *
  * Caller contract: assigning `width`/`height` resets the 2D context. Anything
@@ -91,6 +92,36 @@ export function syncCanvasBackingStore(
   canvas.width = width;
   canvas.height = height;
   return true;
+}
+
+/**
+ * Letterbox rect: the largest rect of aspect `srcW/srcH` that fits inside
+ * `dstW x dstH`, centred. Portrait video into the landscape stage becomes
+ * a centred pillarbox; landscape video into the landscape stage is
+ * full-bleed. Degenerate source dims fall back to the full destination.
+ */
+export function letterboxRect(
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number,
+): { x: number; y: number; width: number; height: number } {
+  if (
+    !Number.isFinite(srcW) ||
+    !Number.isFinite(srcH) ||
+    srcW <= 0 ||
+    srcH <= 0 ||
+    !Number.isFinite(dstW) ||
+    !Number.isFinite(dstH) ||
+    dstW <= 0 ||
+    dstH <= 0
+  ) {
+    return { x: 0, y: 0, width: dstW, height: dstH };
+  }
+  const scale = Math.min(dstW / srcW, dstH / srcH);
+  const width = srcW * scale;
+  const height = srcH * scale;
+  return { x: (dstW - width) / 2, y: (dstH - height) / 2, width, height };
 }
 
 /** Clamp a value into `[min, max]`. */

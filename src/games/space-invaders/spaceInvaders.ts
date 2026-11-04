@@ -12,7 +12,7 @@
  * `core/config.ts` (INVADERS / BODY); this file only reads it.
  */
 
-import { BODY, INVADERS, RENDER, SOURCE } from '../../core/config';
+import { BODY, INVADERS, RENDER, STAGE } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
 import { armCanFire, armDirectionCanvas } from '../../core/bodyState';
 import type { ArmSide, ArmState, BodyState } from '../../core/bodyState';
@@ -189,8 +189,8 @@ export class SpaceInvadersGame implements Game {
   /** Ship x as a fraction of the playfield width (0..1). */
   private shipXNorm = 0.5;
   /** Last canvas size seen in render(); update() runs before any render. */
-  private lastWidth: number = SOURCE.width;
-  private lastHeight: number = SOURCE.height;
+  private lastWidth: number = STAGE.width;
+  private lastHeight: number = STAGE.height;
   private lastNowMs = 0;
 
   private missiles: Missile[] = [];

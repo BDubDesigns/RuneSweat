@@ -23,6 +23,45 @@ export const SOURCE = {
   height: 480,
 } as const;
 
+/**
+ * Fixed game stage. The canvas backing store is ALWAYS this size, never
+ * the video's intrinsic dimensions — a portrait phone video must not make
+ * a tall narrow game. Pose coordinates are normalized, so mapping via
+ * `toCanvas(STAGE.width, STAGE.height)` still works for any capture size.
+ * The camera video, when shown at all (calibration only), is letterboxed
+ * into this stage preserving its aspect ratio.
+ */
+export const STAGE = {
+  width: 960,
+  height: 540,
+} as const;
+
+/**
+ * Body-visible gate. A game must not run while no usable full-body pose
+ * is present — otherwise the player can lose (as in the Nov 4 playtest:
+ * Game Over, score 0) without ever having been seen.
+ */
+export const GATE = {
+  /**
+   * Minimum per-landmark visibility for shoulders + hips. Reuses
+   * `POSE.minVisibility`; the gate checks each of the four landmarks
+   * individually — the mean `visibilityScore` can hide one bad landmark.
+   */
+  minVisibility: 0.5,
+  /**
+   * Knees are nice-to-have in v1, not a blocker: a player whose knees are
+   * out of frame (or low-visibility) can still steer and shoot, so warn
+   * but do not block. Set true only if a future game genuinely needs legs.
+   */
+  requireKnees: false,
+  /**
+   * Grace period in ms before the gate trips when a pose is lost mid-game,
+   * so a single dropped inference frame does not pause the game. A game
+   * started with no usable pose ever is gated immediately (no grace).
+   */
+  gracePeriodMs: 500,
+} as const;
+
 /** Fixed-timestep loop constants. */
 export const LOOP = {
   /** Simulation timestep, fixed, in ms — independent of render rate. */
@@ -83,7 +122,12 @@ export const POSE = {
   fullModelUrl:
     'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
   /** WASM lives under `public/wasm/`, copied from the installed package. */
-  wasmPath: '/wasm',
+  /**
+   * Relative segment only — NO leading slash. Joined with
+   * `import.meta.env.BASE_URL` at use (see `assetUrl`), so it resolves
+   * under the app's subpath on GitHub Pages instead of the domain root.
+   */
+  wasmPath: 'wasm',
   /** One person in frame for v1 (single-player practice). */
   numPoses: 1,
   /** GPU first; the MediaPipe source falls back to CPU if GPU init fails. */
@@ -189,6 +233,74 @@ export const DANCE = {
   pointsGood: 150,
 } as const;
 
+/** Swing Lab tuning (Active RuneSpace Mining prototype, Slice 1). */
+export const SWING = {
+  /**
+   * Windup line: a wrist counts as wound when it is this far ABOVE the
+   * shoulder, as a fraction of torso length. A fully raised straight arm
+   * reads ~1.0 (arm 0.32 / torso 0.30); a bent raised arm reads ~0.5, so
+   * 0.6 needs a real overhead raise with the elbows mostly extended.
+   */
+  windupHeightTorsoFrac: 0.6,
+  /**
+   * Partial-raise line: a wrist above the shoulder by this much counts as
+   * a "partway" raise. A fast drop from a partway raise is a weak swing
+   * ("Swing bigger!"); a slow drop from it is just putting your arms down
+   * (no feedback).
+   */
+  partialHeightTorsoFrac: 0.25,
+  /**
+   * Strike line: chest level, this far BELOW the shoulder as a fraction of
+   * torso length. A counted hit crosses this line on the way down.
+   */
+  strikeLineTorsoFrac: 0.5,
+  /**
+   * Strike velocity: peak downward wrist velocity during the drop, in
+   * torso lengths per second (wristVelY / torsoLength). A real pickaxe
+   * swing drops ~1.4 torso lengths in ~0.25 s (peak ~6-8); lowering your
+   * arms slowly reads ~1-2. Measured against the mouse sim (hold A+D,
+   * release): sim peak is ~7.8 torso/s after tracker smoothing, so 3.0
+   * sits well below a real swing and above a slow lower.
+   */
+  strikeVelocityTorsoFracPerSec: 3.0,
+  /** Cooldown after a counted hit before the next swing can count, in ms. */
+  cooldownMs: 700,
+  /** Re-arm after a weak swing before input counts again, in ms. */
+  weakRearmMs: 300,
+  /** Mining XP per counted hit. */
+  xpPerHit: 10,
+  /** XP per Mining level (level = floor(xp / xpPerLevel) + 1). */
+  xpPerLevel: 100,
+  /** Ore per counted hit. */
+  orePerHit: 1,
+  /** Hits to break one ore node. */
+  hitsPerNode: 5,
+  /** Screen shake on a hit: duration in ms and offset in px. */
+  shakeMs: 150,
+  shakePx: 5,
+  /** Sparkle particles on a node break. */
+  breakParticles: 24,
+  /** "Node broken!" banner length, in ms. */
+  breakBannerMs: 1400,
+  /** Floating "+N XP" text lifetime, in ms. */
+  floaterMs: 900,
+  /**
+   * Wrist-velocity EMA smoothing (bodyState.ts): how much of each new
+   * frame-to-frame velocity sample survives. 1 = raw, 0 = frozen.
+   */
+  wristVelEmaAlpha: 0.35,
+  /** Whoosh: falling sweep as the swing comes down. */
+  whooshStartFreqHz: 900,
+  whooshEndFreqHz: 200,
+  whooshDurationSec: 0.18,
+  /** Crack: short low thud as the pickaxe lands. */
+  crackFreqHz: 220,
+  crackDurationSec: 0.15,
+  /** Weak swing: dull low tick, no hit. */
+  weakTickFreqHz: 180,
+  weakTickDurationSec: 0.08,
+} as const;
+
 /** Web Audio synth SFX. All sounds are synthesized — no audio files. */
 export const AUDIO = {
   enabled: true,
@@ -259,6 +371,7 @@ export const CAMERA = {
 export const GAMES = {
   spaceInvaders: { id: 'space-invaders', title: 'Space Invaders', enabled: true },
   danceDrop: { id: 'dance-drop', title: 'Dance Pose Drop', enabled: true },
+  swingLab: { id: 'swing-lab', title: 'Swing Lab', enabled: true },
   autoRunner: { id: 'auto-runner', title: 'Auto Runner', enabled: false },
   lumberjack: { id: 'lumberjack', title: 'Lumberjack', enabled: false },
 } as const;

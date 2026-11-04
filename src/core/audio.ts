@@ -6,7 +6,7 @@
  * has to tap it once.
  */
 
-import { AUDIO } from './config';
+import { AUDIO, SWING } from './config';
 
 const MUTE_STORAGE_KEY = 'pose-arcade:muted';
 
@@ -115,5 +115,30 @@ export class SoundEffects {
           ? AUDIO.goodFreqHz
           : AUDIO.missFreqHz;
     this.tone(freq, freq, AUDIO.feedbackDurationSec, 'triangle');
+  }
+
+  /** Swing Lab: falling sweep as the pickaxe comes down (strike phase). */
+  public whoosh(): void {
+    this.tone(
+      SWING.whooshStartFreqHz,
+      SWING.whooshEndFreqHz,
+      SWING.whooshDurationSec,
+      'sine',
+    );
+  }
+
+  /** Swing Lab: short low thud as the pickaxe lands on the node. */
+  public crack(): void {
+    this.tone(SWING.crackFreqHz, 60, SWING.crackDurationSec, 'sawtooth');
+  }
+
+  /** Swing Lab: dull low tick for a weak swing (no hit). */
+  public weakTick(): void {
+    this.tone(
+      SWING.weakTickFreqHz,
+      SWING.weakTickFreqHz,
+      SWING.weakTickDurationSec,
+      'triangle',
+    );
   }
 }

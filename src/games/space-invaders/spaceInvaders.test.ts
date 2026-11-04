@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { BODY, INVADERS } from '../../core/config';
+import { BODY, INVADERS, STAGE } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
 import type { ArmState, BodyState } from '../../core/bodyState';
 import {
@@ -23,7 +23,8 @@ import {
 } from './spaceInvaders';
 
 const DT_MS = 1000 / 60;
-const WIDTH = 640;
+/** The game's pre-render playfield size is the fixed STAGE, not the video. */
+const WIDTH = STAGE.width;
 
 /* ------------------------------------------------------------------ */
 /* Fakes                                                               */
@@ -70,6 +71,23 @@ function makeBody(
   return {
     present: true,
     inFrame: true,
+    bodyUsable: true,
+    landmarkVisibility: {
+      leftShoulder: 0.99,
+      rightShoulder: 0.99,
+      leftHip: 0.99,
+      rightHip: 0.99,
+      leftKnee: 0.99,
+      rightKnee: 0.99,
+    },
+    kneesVisible: true,
+    shoulderY: 0.25,
+    leftWristX: 0.39,
+    rightWristX: 0.61,
+    leftWristY: 0.56,
+    rightWristY: 0.56,
+    leftWristVelY: 0,
+    rightWristVelY: 0,
     torsoX,
     torsoY: 0.5,
     torsoLength: 0.3,
@@ -488,12 +506,15 @@ describe('SpaceInvadersGame', () => {
     try {
       const d = makeDriver();
       let cleared = false;
-      // Parked sniper: the ship never leaves x=38 (torsoX=0). Enemy bullets
-      // come from the middle column (mocked random), whose x stays in
-      // [166,474], so the far-left edge is never under a bullet — the bot
-      // cannot die, and the test measures the level-clear mechanic, not
-      // bot dodging skill. Fire straight up only when an alive enemy is
-      // directly above; every column marches to the left edge eventually.
+      // Parked sniper: the ship never leaves x=57.6 (torsoX=0 -> shipMinX
+      // 0.06 of the 960-wide stage). Enemy bullets come from the middle
+      // column (mocked random), whose x stays in [166,794], so the far-left
+      // edge is never under a bullet — the bot cannot die, and the test
+      // measures the level-clear mechanic, not bot dodging skill. Fire
+      // straight up only when an alive enemy is near-directly above (the
+      // leftmost column's closest approach is x=38, ~20px from the ship,
+      // so the window is 25px, not 10px); every column marches to the
+      // left edge eventually.
       for (let i = 0; i < 12000; i++) {
         const snap = d.game.snapshot();
         if (snap.level === 2) {
@@ -502,7 +523,7 @@ describe('SpaceInvadersGame', () => {
         }
         if (snap.gameOver) break;
         const above = snap.enemies.some(
-          (e) => Math.abs(e.x - snap.shipX) < 10,
+          (e) => Math.abs(e.x - snap.shipX) < 25,
         );
         const raise = snap.missiles.length === 0 && above;
         const body = makeBody(

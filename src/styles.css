@@ -122,13 +122,16 @@ body {
 .stage-wrap {
   position: relative;
   width: 100%;
-  aspect-ratio: 4 / 3;
+  /* Fixed landscape stage (960x540 backing store): portrait phone video
+     is letterboxed inside it, never stretched, never tall-narrow. */
+  aspect-ratio: 16 / 9;
   background: #000;
   border-radius: 16px;
   overflow: hidden;
 }
 
 #stage {
+  /* Backing store is fixed landscape, so CSS scaling preserves aspect. */
   width: 100%;
   height: 100%;
   display: block;
@@ -179,6 +182,11 @@ body {
   color: var(--danger);
   font-weight: 700;
   font-size: 1.1rem;
+}
+
+/* Live body indicator, green state: a usable body is in frame. */
+.warning.ok {
+  color: #7ef0c1;
 }
 
 #legend {

@@ -1,9 +1,0 @@
-node_modules/
-dist/
-coverage/
-.DS_Store
-*.local
-public/models/*.task
-!public/models/.gitkeep
-public/wasm/*
-!public/wasm/.gitkeep

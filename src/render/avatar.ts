@@ -120,6 +120,34 @@ export function headRadiusPx(torsoLengthPx: number): number {
   return AVATAR.headRadiusTorsoFrac * torsoLengthPx;
 }
 
+/** Canvas-space head circle for a pose: centre + radius. */
+export interface HeadGeometry {
+  cx: number;
+  cy: number;
+  r: number;
+}
+
+/**
+ * Pure: where the head circle goes. `cx` is the ear midpoint; `cy` is
+ * `headCentreAboveNeckHeadFrac` head-radii above the shoulder (neck)
+ * line, so the chin (`cy + r`) overlaps the torso top and the head sits
+ * ON the neck — no gap, whatever the ear-to-shoulder distance of the
+ * framing. v3 centred the head on the ears, which floated the chin
+ * ~25 px above the neck on the sim body.
+ */
+export function headGeometry(
+  joints: AvatarJoints,
+  headR: number,
+): HeadGeometry {
+  const cx = (joints.leftEar.x + joints.rightEar.x) / 2;
+  const shoulderY = (joints.leftShoulder.y + joints.rightShoulder.y) / 2;
+  return {
+    cx,
+    cy: shoulderY - headR * AVATAR.headCentreAboveNeckHeadFrac,
+    r: headR,
+  };
+}
+
 /**
  * Pure: resolve an outfit against the default. A partial override swaps
  * whole slots (top / bottoms / skin / hat); anything not overridden keeps
@@ -389,37 +417,43 @@ export class AvatarRenderer {
     }
   }
 
-  /** Head: skin circle, two dot eyes + a small smile, then the hat. */
+  /**
+   * Head: skin circle, two dot eyes + a small smile, then the hat. The
+   * circle comes from `headGeometry` — big (0.24 torso lengths) and
+   * sitting on the neck, chin overlapping the torso top. The face is
+   * drawn relative to the head centre, NOT the nose landmark: the nose
+   * rides ~0.3 torso lengths above the shoulders, so nose-anchored
+   * eyes would sit at the top rim of the bigger, lower head. `nose.x`
+   * still centres the face horizontally.
+   */
   private drawHead(
     ctx: CanvasRenderingContext2D,
     j: AvatarJoints,
     headR: number,
     outfit: AvatarOutfit,
   ): void {
-    // Head centre: between the ears when both are seen, else above the nose.
-    const cx = (j.leftEar.x + j.rightEar.x) / 2;
-    const cy = (j.leftEar.y + j.rightEar.y) / 2 - headR * 0.15;
+    const { cx, cy, r } = headGeometry(j, headR);
     ctx.fillStyle = outfit.skin.tone;
     ctx.beginPath();
-    ctx.arc(cx, cy, headR, 0, Math.PI * 2);
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.fill();
-    // Friendly face: dot eyes above the nose, small smile below it.
+    // Friendly face: dot eyes above the head centre, small smile below it.
     ctx.fillStyle = '#26221f';
-    const eyeDX = headR * 0.38;
-    const eyeY = j.nose.y - headR * 0.28;
+    const eyeDX = r * 0.38;
+    const eyeY = cy - r * 0.3;
     for (const ex of [j.nose.x - eyeDX, j.nose.x + eyeDX]) {
       ctx.beginPath();
-      ctx.arc(ex, eyeY, headR * 0.09, 0, Math.PI * 2);
+      ctx.arc(ex, eyeY, r * 0.09, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.strokeStyle = '#26221f';
-    ctx.lineWidth = Math.max(2, headR * 0.06);
+    ctx.lineWidth = Math.max(2, r * 0.06);
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.arc(j.nose.x, j.nose.y + headR * 0.22, headR * 0.32, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.arc(j.nose.x, cy + r * 0.25, r * 0.32, 0.15 * Math.PI, 0.85 * Math.PI);
     ctx.stroke();
     if (outfit.hat.style === 'hard-hat') {
-      this.drawHardHat(ctx, cx, cy, headR, outfit.hat.color);
+      this.drawHardHat(ctx, cx, cy, r, outfit.hat.color);
     }
   }
 

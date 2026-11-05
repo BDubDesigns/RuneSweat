@@ -699,8 +699,27 @@ export const OUTFIT: AvatarOutfit = {
 export const AVATAR = {
   /** Limb capsule width, as a fraction of torso length. */
   limbWidthTorsoFrac: 0.16,
-  /** Head radius, as a fraction of torso length. */
-  headRadiusTorsoFrac: 0.17,
+  /**
+   * Head radius, as a fraction of torso length.
+   *
+   * Was 0.17 in v3; raised to 0.24 in v3.1. Brandon's v3 playtest note:
+   * "head too small and disconnected". 0.24 puts the head diameter at
+   * ~0.48 torso lengths against a ~0.73-torso shoulder width — a big
+   * cartoon head, still narrower than the shoulders. The hard hat scales
+   * with the head (`drawHardHat` takes `headR`), so it grows with it.
+   */
+  headRadiusTorsoFrac: 0.24,
+  /**
+   * Head centre sits this many head-radii ABOVE the shoulder (neck)
+   * line, so the chin overlaps the torso top by the rest of the radius
+   * and the head sits ON the neck instead of floating above it. v3
+   * centred the head on the ears (`earY - 0.15 * headR`), which left
+   * the chin ~25 px above the neck on the sim body. The face is drawn
+   * relative to this centre (see `headGeometry` in `render/avatar.ts`),
+   * not the nose landmark, so the head can sit on the neck for any
+   * ear-to-shoulder distance the framing gives.
+   */
+  headCentreAboveNeckHeadFrac: 0.55,
   /** Heart size on the boxers, as a fraction of torso length. */
   heartSizeTorsoFrac: 0.09,
   /** One Euro smoothing for avatar joints (same tuning as BODY). */

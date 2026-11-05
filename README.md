@@ -18,8 +18,8 @@ Then: pick a game, tap **Turn Camera On** (camera needs a secure page —
 `https` or `localhost`), stand back so your whole body fits in frame.
 
 No camera? Tap **Play Without Camera**: move the mouse to move, hold it
-to raise an arm at an angle, `A`/`D` raise arms straight up, `Space`
-jump, `S` duck. `?source=replay` plays a recorded clip instead.
+to raise an arm at an angle, `A`/`D` raise arms straight up, `W`
+jump, `S` duck. `Space` pauses (press it again to resume). `?source=replay` plays a recorded clip instead.
 
 ## The games
 
@@ -31,7 +31,7 @@ jump, `S` duck. `?source=replay` plays a recorded clip instead.
 
 ## Playing on a phone (GitHub Pages)
 
-Open the Pages link, tap **Turn Camera On**, stand back so head-to-knees fit in frame, and wait for the green **"✅ Body found"** indicator — the game will not start until it can see your body, and it pauses itself if you step out of frame.
+Open the Pages link, tap **Turn Camera On**, stand back so head-to-knees fit in frame, and wait for the green **"✅ Body found"** indicator — the game will not start until it can see your body. Two ways it pauses: stepping out of frame pauses automatically and stepping back in resumes it ("Step back into frame"); pressing `Space` (or the **⏸ Pause** button) pauses on purpose and opens the town hub — it stays paused until you press `Space` / **⏸** again, even if you step back into frame ("Paused — press Space to resume").
 
 **You won't see yourself on screen** — you see the game and your miner (white tank top, heart boxers, hard hat) only. The camera video is hidden by default; the **"📷 Show Camera"** button (or `V`) shows it letterboxed for calibration. The game stage is a fixed 16:9 landscape frame whatever shape your phone's camera is, so the video never stretches. On desktop the stage fills the browser window, and the **"⛶ Fullscreen"** button (or `F`) puts the whole stage fullscreen.
 
@@ -175,6 +175,13 @@ Second playtest (Brandon, Nov 4, ~4:30 PM, laptop, 77 s video): Lv 5, 43 swings,
 **Copy fix.** The hub tip said "you'll see your skeleton" — v2 shipped a person, so it now says "you'll see your miner in a hard hat". The Swing Lab hub card names the mine: "mine Ferrite Shale at The Jag!".
 
 **Still unverified (needs a real device).** The node's look on a real phone screen (boulder art + crystals at phone size), fullscreen on a real browser, image loading under the Pages subpath (`./item-art/...` — correct by construction via `assetUrl`, never exercised against the live subpath), and whether the bigger shake / debris / pieces read well or overwhelm a small screen.
+
+## Swing Lab v3.1a — shake settles, bigger head, two pause kinds (Worker A, Nov 4, 2026)
+
+- **Shake settles.** The hit shake now decays to exactly (0, 0) instead of cutting from full amplitude, and the HUD (swing meter, phase text, tier chips, banners, respawn bar) is drawn outside the shake transform — the node/avatar may shake, the HUD never moves. (The fix also caught a latent bug: `drawNode` saved the canvas context without restoring it.)
+- **Head: bigger and lower.** Head radius 0.17 → 0.24 torso lengths, centre moved down so the chin overlaps the torso top — the head sits on the neck, no gap, no floating. The hard hat scales with the head.
+- **Two pause kinds.** `Space` (or the **⏸ Pause** button) pauses on purpose: it opens the town hub and stays paused until you press `Space` / **⏸** again, even if you step back into frame. Stepping out of frame pauses automatically and stepping back in resumes it — auto pause never opens the hub. Pressing `Space` while auto-paused converts to a manual pause (the hub opens) instead of the button doing nothing.
+- **Rebind.** `Space` was the mouse-sim jump key; jump is now `W` (hold), `S` duck stays. The real-camera body jump is unaffected.
 
 ## Swing Lab v3.1b — town hub, refiner, Bix sell, local save (Worker B, Nov 4, 2026)
 

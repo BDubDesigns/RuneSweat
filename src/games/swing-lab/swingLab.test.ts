@@ -4,11 +4,13 @@ import type { BodyState } from '../../core/bodyState';
 import { BodyStateTracker } from '../../core/bodyState';
 import { MouseSource } from '../../sim/mouseSource';
 import {
+  BREAK,
   cracksForHits,
   miningLevel,
   nodeCenterForBody,
   nodeRadiiForStage,
   pickaxeAnchorForBody,
+  shakeOffsetPx,
   SwingLabGame,
   xpIntoLevel,
 } from './swingLab';
@@ -719,5 +721,170 @@ describe('Swing Lab v3: node break lifecycle', () => {
     expect(maxPieces).toBeLessThanOrEqual(6);
     // One hit's debris (8) + one break's sparkles (24), no pile-up.
     expect(maxParticles).toBeLessThanOrEqual(40);
+  });
+});
+
+/**
+ * v3.1 shake fix (Nov 4, 2026 playtest: "after shaking, the HUD stays
+ * jangled around"). Root cause: the shake was a constant-amplitude
+ * random offset that cut to zero the frame it ended, AND the HUD text
+ * (meter, phase text, chips, banners) was drawn inside the same
+ * transform. Now the offset decays linearly to exactly (0, 0) at the
+ * end of the shake, and the HUD is drawn outside the shake transform.
+ */
+describe('shakeOffsetPx (pure)', () => {
+  // rand() = 1 pins the offset at +amplitude on both axes.
+  const fixed = (): number => 1;
+
+  it('is exactly (0, 0) at and after the shake end', () => {
+    expect(shakeOffsetPx(1250, 1000, 1250, 12, fixed)).toEqual({
+      x: 0,
+      y: 0,
+    });
+    expect(shakeOffsetPx(2000, 1000, 1250, 12, fixed)).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  it('is exactly (0, 0) before the shake starts and for a degenerate window', () => {
+    expect(shakeOffsetPx(500, 1000, 1250, 12, fixed)).toEqual({
+      x: 0,
+      y: 0,
+    });
+    expect(shakeOffsetPx(1100, 1000, 1000, 12, fixed)).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  it('is full amplitude at the start and half at the midpoint', () => {
+    expect(shakeOffsetPx(1000, 1000, 1250, 12, fixed)).toEqual({
+      x: 12,
+      y: 12,
+    });
+    expect(shakeOffsetPx(1125, 1000, 1250, 12, fixed)).toEqual({
+      x: 6,
+      y: 6,
+    });
+  });
+
+  it('decays toward zero instead of cutting from full amplitude', () => {
+    const late = shakeOffsetPx(1249, 1000, 1250, 12, fixed);
+    expect(Math.abs(late.x)).toBeLessThan(0.1);
+    expect(Math.abs(late.y)).toBeLessThan(0.1);
+  });
+});
+
+describe('SwingLabGame render: shake settles, HUD never moves (v3.1)', () => {
+  /**
+   * A stub context that tracks the transform: save/restore keep a
+   * stack, translate accumulates, and fillText records its EFFECTIVE
+   * position (args + current offset) — so a HUD line drawn inside the
+   * shake transform would show up shifted, and one drawn outside it
+   * shows up at its nominal coordinates.
+   */
+  function trackingContext(): {
+    ctx: CanvasRenderingContext2D;
+    translates: { x: number; y: number }[];
+    phaseTextAt: { x: number; y: number }[];
+  } {
+    const translates: { x: number; y: number }[] = [];
+    const phaseTextAt: { x: number; y: number }[] = [];
+    let tx = 0;
+    let ty = 0;
+    const stack: { x: number; y: number }[] = [];
+    const target: Record<string, unknown> = {};
+    const stub = new Proxy(target, {
+      get: (_t, prop) => {
+        if (prop === 'canvas') return { width: 960, height: 540 };
+        if (prop === 'save') {
+          return () => {
+            stack.push({ x: tx, y: ty });
+          };
+        }
+        if (prop === 'restore') {
+          return () => {
+            const prev = stack.pop();
+            if (prev !== undefined) {
+              tx = prev.x;
+              ty = prev.y;
+            }
+          };
+        }
+        if (prop === 'translate') {
+          return (x: number, y: number) => {
+            tx += x;
+            ty += y;
+            translates.push({ x, y });
+          };
+        }
+        if (prop === 'fillText' || prop === 'strokeText') {
+          return (_text: string, x: number, y: number) => {
+            // The phase headline is the 34px line at y 58 (drawPhaseText).
+            if (y === 58) phaseTextAt.push({ x: x + tx, y: y + ty });
+          };
+        }
+        if (prop === 'measureText') return () => ({ width: 0 });
+        return () => undefined;
+      },
+      set: (t, prop, value) => {
+        t[prop as string] = value;
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx: stub, translates, phaseTextAt };
+  }
+
+  it('a hit shakes the world, the offset settles to exactly (0, 0), and the phase text never moves', () => {
+    const mouse = new MouseSource();
+    const tracker = new BodyStateTracker();
+    const game = new SwingLabGame(new SoundEffects());
+    mouse.start(0);
+    game.start();
+    const track = trackingContext();
+    // One full swing, rendering every 16 ms tick: raise (0-500 ms),
+    // release and chop (500-900 ms), then idle. The hit lands in the
+    // drop; the shake runs 250 ms from it.
+    mouse.setKeyArm('left', true);
+    mouse.setKeyArm('right', true);
+    const frames: { t: number; dx: number; dy: number }[] = [];
+    for (let t = 16; t <= 1600; t += 16) {
+      if (t === 512) {
+        mouse.setKeyArm('left', false);
+        mouse.setKeyArm('right', false);
+      }
+      const frame = mouse.frameAt(t);
+      if (frame === null) continue;
+      const body = tracker.update(frame);
+      game.update(16, t, body, frame.landmarks);
+      const before = track.translates.length;
+      game.render(track.ctx, t, body, frame.landmarks);
+      const added = track.translates.slice(before);
+      // Exactly one translate per render: the shake offset.
+      expect(added.length).toBe(1);
+      const offset = added[0];
+      if (offset !== undefined) frames.push({ t, dx: offset.x, dy: offset.y });
+    }
+    expect(game.snapshot().swings).toBe(1);
+    // The shake happened: some frame moved by more than a pixel.
+    const maxMag = Math.max(...frames.map((f) => Math.hypot(f.dx, f.dy)));
+    expect(maxMag).toBeGreaterThan(1);
+    expect(maxMag).toBeLessThanOrEqual(BREAK.shakePx * Math.SQRT2);
+    // Well after the hit (hit lands before t 900, shake is 250 ms), the
+    // offset is exactly (0, 0) on every frame — settled, not jangled.
+    for (const f of frames) {
+      if (f.t >= 1200) {
+        expect(f.dx).toBe(0);
+        expect(f.dy).toBe(0);
+      }
+    }
+    // The HUD never moved: the phase headline drew at its nominal
+    // position (centre x, y 58) on every frame, even mid-shake.
+    expect(track.phaseTextAt.length).toBeGreaterThan(0);
+    for (const at of track.phaseTextAt) {
+      expect(at.x).toBe(480);
+      expect(at.y).toBe(58);
+    }
   });
 });

@@ -41,6 +41,13 @@ export interface HudReadout {
   /** Age of the video element's currentTime in ms (null = unknown). */
   videoCurrentTimeAgeMs?: number | null;
   /**
+   * Which kind of pause holds the game, if any (v3.1): 'manual' =
+   * player pressed Space / Pause (hub open), 'auto' = gate closed
+   * (body left frame). Undefined = unknown / not paused. The union
+   * mirrors `PauseKind` in main.ts (this module must not import main).
+   */
+  pauseKind?: 'none' | 'manual' | 'auto';
+  /**
    * Measured numbers behind the last weak swing (v3), e.g.
    * "peak 2.1 torso/s, need 2.5" — the reject reason the "last swing"
    * line names, with the evidence. Optional: only the Swing Lab game
@@ -56,7 +63,11 @@ function truncate(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
-/** Draw the debug readout in the top-left corner of the canvas. */
+/** Draw the debug readout in the top-left corner of the canvas.
+ *
+ * Called by main.ts AFTER the game render's `ctx.restore()`, so the HUD
+ * never inherits the game's shake transform (v3.1: the HUD must not
+ * move when the world shakes). */
 export function drawHud(
   ctx: CanvasRenderingContext2D,
   readout: HudReadout,
@@ -128,6 +139,13 @@ export function drawHud(
     );
   } else {
     lines.push('no person detected');
+  }
+  // Pause kind (v3.1): which pause holds the game, and what resumes it.
+  // No line while playing.
+  if (readout.pauseKind === 'manual') {
+    lines.push('pause MANUAL — Space to resume (hub open)');
+  } else if (readout.pauseKind === 'auto') {
+    lines.push('pause AUTO — step back into frame to resume');
   }
   if (readout.swingWeakDetail !== undefined && readout.swingWeakDetail !== null) {
     lines.push(`last weak: ${truncate(readout.swingWeakDetail, 80)}`);

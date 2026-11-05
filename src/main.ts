@@ -72,6 +72,136 @@ function requireElement<T extends HTMLElement>(id: string, ctor: new () => T): T
   return el;
 }
 
+/**
+ * Pause kinds (Swing Lab v3.1, Nov 4, 2026). Two ways a game can be
+ * paused, and they must not be confused:
+ *
+ * - `manual`: the player pressed Spacebar or the Pause button. Opens
+ *   the town-hub overlay and STAYS paused until Spacebar / Pause is
+ *   pressed again — coming back into frame must NOT resume it.
+ * - `auto`: the body-visible gate closed (body left frame). Resumes
+ *   automatically when the body returns. NEVER opens the hub.
+ * - `none`: playing.
+ *
+ * The old `pausedByGate` boolean could not tell these apart, so a
+ * manual pause was silently resumed by the gate and the Pause button
+ * went inert while gated.
+ */
+export type PauseKind = 'none' | 'manual' | 'auto';
+
+/**
+ * Town-hub overlay plug (Worker B, `src/hub/`): the hub opens when the
+ * player pauses manually and closes when they resume. main.ts calls
+ * these; it never draws the hub itself. Register with
+ * `registerHubOverlay`; until one is registered the canvas fallback in
+ * main.ts ("Paused — press Space to resume") is the manual-pause
+ * surface, and it stands down the moment a hub registers.
+ */
+export interface HubOverlay {
+  /** Show the town-hub overlay. Called only for a manual pause, never auto. */
+  open(): void;
+  /** Hide the town-hub overlay. */
+  close(): void;
+}
+
+/** The town-hub overlay currently registered by `src/hub/`, if any. */
+let hubOverlay: HubOverlay | null = null;
+
+/**
+ * Register (or unregister with `null`) the town-hub overlay. Called by
+ * Worker B's hub module at integration; main.ts never imports the hub,
+ * so there is no import cycle — the hub imports this function.
+ */
+export function registerHubOverlay(hub: HubOverlay | null): void {
+  hubOverlay = hub;
+}
+
+/**
+ * Events the pause state machine raises. main.ts wires them to the game,
+ * the Pause button label, and the hub overlay.
+ */
+export interface PauseEvents {
+  /** A manual pause started: the game must pause and the hub must open. */
+  onManualPause(): void;
+  /** A manual pause ended: the hub must close and the game must resume. */
+  onManualResume(): void;
+  /** The gate paused the game (body left frame): pause, no hub. */
+  onAutoPause(): void;
+  /** The gate reopened: resume. Never fires while a manual pause holds. */
+  onAutoResume(): void;
+}
+
+/**
+ * The pause state machine (pure — no DOM, no game; unit-tested in
+ * `src/main.test.ts`). Transition table:
+ *
+ * | from   | event            | to       | side effect                  |
+ * |--------|------------------|----------|------------------------------|
+ * | none   | toggleManual     | manual   | onManualPause (hub opens)  |
+ * | manual | toggleManual     | none     | onManualResume (hub closes)|
+ * | auto   | toggleManual     | manual   | onManualPause (CONVERTS:   |
+ * |        |                  |          | the press is honoured, the |
+ * |        |                  |          | game stays paused, hub     |
+ * |        |                  |          | opens; stepping back into  |
+ * |        |                  |          | frame no longer resumes)   |
+ * | none   | gateClosed       | auto     | onAutoPause (no hub)       |
+ * | manual | gateClosed       | manual   | nothing (gate must not     |
+ * |        |                  |          | touch a manual pause)      |
+ * | auto   | gateClosed       | auto     | nothing                    |
+ * | auto   | gateOpened       | none     | onAutoResume               |
+ * | manual | gateOpened       | manual   | nothing (body returning    |
+ * |        |                  |          | must NOT resume it)        |
+ * | none   | gateOpened       | none     | nothing                    |
+ * | any    | reset            | none     | the matching resume event  |
+ * |        |                  |          | (manual -> onManualResume, |
+ * |        |                  |          | auto -> onAutoResume)      |
+ */
+export class PauseController {
+  public kind: PauseKind = 'none';
+
+  public constructor(private readonly events: PauseEvents) {}
+
+  /** Spacebar / Pause button. */
+  public toggleManual(): void {
+    if (this.kind === 'manual') {
+      this.kind = 'none';
+      this.events.onManualResume();
+    } else {
+      this.kind = 'manual';
+      this.events.onManualPause();
+    }
+  }
+
+  /** The body-visible gate closed (body left frame). */
+  public gateClosed(): void {
+    if (this.kind === 'none') {
+      this.kind = 'auto';
+      this.events.onAutoPause();
+    }
+    // 'manual' stays manual; 'auto' stays auto.
+  }
+
+  /** The body-visible gate opened (body back in frame). */
+  public gateOpened(): void {
+    if (this.kind === 'auto') {
+      this.kind = 'none';
+      this.events.onAutoResume();
+    }
+    // 'manual' stays manual; 'none' stays none.
+  }
+
+  /** Restart / quit / new game: clear any pause, closing the hub. */
+  public reset(): void {
+    if (this.kind === 'manual') {
+      this.kind = 'none';
+      this.events.onManualResume();
+    } else if (this.kind === 'auto') {
+      this.kind = 'none';
+      this.events.onAutoResume();
+    }
+  }
+}
+
 function main(): void {
   const canvas = requireElement('stage', HTMLCanvasElement);
   const ctx = canvas.getContext('2d');
@@ -145,8 +275,34 @@ function main(): void {
     message: 'Step back so I can see your whole body',
     lastUsableMs: null,
   };
-  /** True when the gate (not the player) paused the game. */
-  let pausedByGate: boolean = false;
+  /**
+   * Two pause kinds (v3.1) — see `PauseController`. The controller owns
+   * the state; these callbacks wire it to the game, the Pause button
+   * label, and the town-hub overlay (Worker B's module, via
+   * `registerHubOverlay`). The callbacks read `activeGame` at call
+   * time, so they stay correct across game switches.
+   */
+  const pause = new PauseController({
+    onManualPause: () => {
+      activeGame?.pause();
+      btnPause.textContent = '▶ Play';
+      hubOverlay?.open();
+    },
+    onManualResume: () => {
+      activeGame?.resume();
+      btnPause.textContent = '⏸ Pause';
+      hubOverlay?.close();
+    },
+    onAutoPause: () => {
+      activeGame?.pause();
+      // Label stays '⏸ Pause': pressing it now converts to a manual
+      // pause (opens the hub) instead of resuming into a closed gate.
+    },
+    onAutoResume: () => {
+      activeGame?.resume();
+      btnPause.textContent = '⏸ Pause';
+    },
+  });
   /**
    * True when a game was picked but its simulation has not started yet:
    * `start()` is deferred until the gate opens, so a game never runs (or
@@ -162,20 +318,13 @@ function main(): void {
     return mediaPipe.ready ? 'ready' : 'loading';
   }
 
-  /** Apply the gate decision: pause/resume the game and the Pause label. */
+  /** Apply the gate decision through the pause state machine. */
   function applyGate(gate: GateState): void {
     currentGate = gate;
     lastUsableMs = gate.lastUsableMs;
     if (activeGame === null) return;
-    if (gate.gated && !activeGame.paused) {
-      activeGame.pause();
-      pausedByGate = true;
-      btnPause.textContent = '▶ Play';
-    } else if (!gate.gated && pausedByGate) {
-      activeGame.resume();
-      pausedByGate = false;
-      btnPause.textContent = '⏸ Pause';
-    }
+    if (gate.gated) pause.gateClosed();
+    else pause.gateOpened();
   }
 
   // ---------------------------------------------------------------- hub ---
@@ -240,7 +389,10 @@ function main(): void {
     lastFrameTimestampMs = null;
     lastFrameReceivedMs = null;
     pendingStart = false;
-    pausedByGate = false;
+    // Clearing the pause closes the hub when one was open (manual) and
+    // resumes the game state; the game itself is already stopped above,
+    // so the resume is a no-op for it.
+    pause.reset();
     lastUsableMs = null;
     currentGate = {
       gated: true,
@@ -360,28 +512,22 @@ function main(): void {
 
   btnPause.addEventListener('click', () => {
     if (activeGame === null) return;
-    // While the gate holds the game paused, the Pause button is inert:
-    // resuming here would be undone by the next gate evaluation anyway.
-    if (currentGate.gated) return;
-    pausedByGate = false;
-    if (activeGame.paused) {
-      activeGame.resume();
-      btnPause.textContent = '⏸ Pause';
-    } else {
-      activeGame.pause();
-      btnPause.textContent = '▶ Play';
-    }
+    // Spacebar / Pause button toggle a MANUAL pause. During an
+    // auto-pause this converts to manual (opens the hub) instead of
+    // being inert — see PauseController.toggleManual.
+    pause.toggleManual();
   });
   btnRestart.addEventListener('click', () => {
     if (activeGame === null) return;
     activeGame.restart();
-    pausedByGate = false;
+    // Restart clears any pause (and closes the hub when one was open);
+    // the resume event sets the Pause label back.
+    pause.reset();
     // Restart re-arms the game; if the gate is closed the next update
     // pauses it again until a usable body returns, so no simulation runs
     // while unseen. If the game was still pending its first start, the
     // restart counts as that start.
     pendingStart = false;
-    btnPause.textContent = '⏸ Pause';
   });
   btnQuit.addEventListener('click', quitToHub);
   btnMute.addEventListener('click', () => {
@@ -484,10 +630,18 @@ function main(): void {
     if (key === 'd' && activeSource === mouse) mouse.setKeyArm('right', true);
     if (key === 'q' && activeSource === mouse) mouse.setKeyArmAngled('left', true);
     if (key === 'e' && activeSource === mouse) mouse.setKeyArmAngled('right', true);
-    if (key === ' ' && activeSource === mouse) {
+    if (key === ' ' && activeGame !== null) {
+      // Spacebar is the pause toggle everywhere (v3.1): it used to be
+      // the mouse-sim jump key, which now lives on W. `event.repeat`
+      // is filtered above, so holding Space cannot toggle repeatedly.
+      // preventDefault stops the page scrolling on the toggle.
       event.preventDefault();
-      mouse.setJumping(true);
+      pause.toggleManual();
     }
+    // W (hold) is the mouse-sim jump key (v3.1): Space is pause now.
+    // The real-camera body jump is unaffected — it comes from
+    // landmarks, not the key.
+    if (key === 'w' && activeSource === mouse) mouse.setJumping(true);
     if (key === 's' && activeSource === mouse) mouse.setDucking(true);
     if (key === 'm') btnMute.click();
     if (key === 'v') btnVideo.click();
@@ -503,7 +657,7 @@ function main(): void {
     if (key === 'd' && activeSource === mouse) mouse.setKeyArm('right', false);
     if (key === 'q' && activeSource === mouse) mouse.setKeyArmAngled('left', false);
     if (key === 'e' && activeSource === mouse) mouse.setKeyArmAngled('right', false);
-    if (key === ' ' && activeSource === mouse) mouse.setJumping(false);
+    if (key === 'w' && activeSource === mouse) mouse.setJumping(false);
     if (key === 's' && activeSource === mouse) mouse.setDucking(false);
   });
 
@@ -540,7 +694,11 @@ function main(): void {
       );
       applyGate(gate);
       if (gate.gated) return;
-      if (pendingStart) {
+      if (pendingStart && pause.kind === 'none') {
+        // A manual pause before the first start defers the start: the
+        // game must not start (and un-pause itself via start()) while
+        // the player is sitting in the hub. Resuming starts it on the
+        // next update.
         activeGame.start();
         pendingStart = false;
       }
@@ -598,15 +756,33 @@ function main(): void {
 
       // Blocking overlay on the stage itself when gated: model failure
       // says so loudly (never the "step back" message), otherwise the
-      // framing message + ghost outline. Never drawn when the gate is open.
-      if (activeGame !== null && currentGate.gated) {
+      // framing message + ghost outline. Never drawn when the gate is open,
+      // and never drawn over a manual pause — the manual overlay below
+      // (or the hub) owns that surface.
+      if (activeGame !== null && currentGate.gated && pause.kind !== 'manual') {
         const isModel = currentGate.reason !== 'no-body';
         drawBlockingOverlay(context, canvas.width, canvas.height, {
-          title: currentGate.message,
+          title:
+            !isModel && pause.kind === 'auto'
+              ? 'Step back into frame'
+              : currentGate.message,
           subtitle: isModel
             ? ''
             : 'Arms out wide — shoulders and hips in view',
           showGhost: !isModel,
+        });
+      }
+
+      // Manual pause surface (v3.1): the game is paused by the player,
+      // not the gate, so the gate overlay above does not apply. Until
+      // Worker B's town-hub overlay registers (registerHubOverlay),
+      // the canvas says which kind of pause this is; once the hub is
+      // registered it owns the surface and this stays out of the way.
+      if (activeGame !== null && pause.kind === 'manual' && hubOverlay === null) {
+        drawBlockingOverlay(context, canvas.width, canvas.height, {
+          title: 'Paused — press Space to resume',
+          subtitle: '',
+          showGhost: false,
         });
       }
 
@@ -623,7 +799,13 @@ function main(): void {
           outOfFrame.textContent = '⏳ Loading pose model…';
           outOfFrame.classList.remove('ok');
         } else if (currentGate.gated) {
-          outOfFrame.textContent = `⚠️ ${currentGate.message}.`;
+          // Auto pause (v3.1): the overlay/HUD say "Step back into
+          // frame" for a lost body; model problems keep the gate's own
+          // message (handled in the branches above).
+          outOfFrame.textContent =
+            pause.kind === 'auto' && currentGate.reason === 'no-body'
+              ? '⚠️ Step back into frame.'
+              : `⚠️ ${currentGate.message}.`;
           outOfFrame.classList.remove('ok');
         } else {
           outOfFrame.textContent = '✅ Body found — you\'re good to play!';
@@ -650,6 +832,7 @@ function main(): void {
           sourceId: activeSource.id,
           body: latestBody,
           modelReady,
+          pauseKind: pause.kind,
           lastFrameAgeMs: lastFrameMs === null ? null : nowMs - lastFrameMs,
           landmarkCount:
             latestLandmarks === null ? null : latestLandmarks.length,
@@ -690,4 +873,11 @@ function main(): void {
   }
 }
 
-main();
+/**
+ * Boot the hub only where a DOM exists. Importing this module in a test
+ * (node, no DOM) must not boot the hub: the pause state machine below is
+ * unit-tested from here (`src/main.test.ts`).
+ */
+if (typeof document !== 'undefined') {
+  main();
+}

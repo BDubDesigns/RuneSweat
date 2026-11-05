@@ -169,8 +169,9 @@ tests/builds never caught it. Fixes, all in this repo now:
   the gate opens; losing the pose mid-game auto-pauses after a 500 ms
   grace (one dropped frame never pauses), and a pose frame older than
   `GATE.staleFrameMs` (2000 ms) closes the gate even inside the grace
-  period. The DOM indicator is red "Step back — I can't see your body"
-  vs green "✅ Body found". The old inverted out-of-frame logic (which
+  period. The DOM indicator is red "⚠️ Step back into frame." vs green
+  "✅ Body found" for a lost body (v3.1: the auto-pause wording; model
+  failures keep the gate's own message). The old inverted out-of-frame logic (which
   hid the warning when there was no body at all) is gone.
 
 ## Playtest failure — Nov 4, 2026, Swing Lab freeze
@@ -545,6 +546,36 @@ Second playtest (Brandon, Nov 4, ~4:30 PM, laptop, 77 s video): Lv 5, 43 swings,
 **Copy fix.** Hub tip: "you'll see your skeleton" → "you'll see your miner in a hard hat" (v2 shipped a person). Swing Lab hub card: "mine Ferrite Shale at The Jag!".
 
 **Still unverified (needs a real device / browser).** The node's look on a real phone screen (boulder art + crystals at phone size); fullscreen on a real browser; image loading under the Pages subpath (`./item-art/...` — correct by construction via `assetUrl`, never exercised live); whether the bigger shake / debris / pieces read well or overwhelm a small screen; the respawn wait feel (3 s + 400 ms fade) in real play.
+
+## Swing Lab v3.1a — shake settles, bigger head on the neck, two pause kinds (Worker A, Nov 4, 2026)
+
+Brandon's v3 playtest notes: "much better", plus (1) after shaking, the HUD stays jangled around, (2) the head is too small and disconnected — bigger and lower on the neck, (3) a pause redesign: two pause kinds. Worker B builds the town hub / refiner in v3.1b; this slice is the feel fixes + the pause state machine + the wiring points B's hub plugs into.
+
+**Shake settles (`swingLab.ts`: `shakeOffsetPx`, render split).** Root cause: the shake was a constant-amplitude random offset that cut to zero the frame it ended, AND the HUD text (swing meter, phase text, tier chips, banners, respawn bar) was drawn inside the same `ctx.translate` — during active play (a hit every couple of seconds) the HUD was almost always jangled. Fix: `shakeOffsetPx(nowMs, shakeStartMs, shakeUntilMs, ampPx)` decays the amplitude linearly to exactly (0, 0) at the end of the shake (no snap), and `render()` now draws the world (node, particles, pieces, drops, pickaxe, floaters) inside the shake transform and the HUD after the `restore()`, outside it — the HUD never moves. The node/avatar may shake; the HUD must not. Tests: pure helper (exact (0, 0) at/after the end, full amplitude at the start, half at the midpoint) + a render test with a transform-tracking stub context (a hit shakes the world, the offset is exactly (0, 0) well after the hit, the phase headline draws at its nominal position on every frame, even mid-shake). The render test caught a real latent bug: `drawNode` did `ctx.save()` with no matching `restore()` — invisible while everything lived inside one outer save/restore, but it leaked the shake offset into the HUD once the HUD moved outside the transform. `drawNode` now restores. `SWING.shakeMs` (150) / `shakePx` (5) and `xpPerHit` (10) are still dead config (v3 uses `BREAK.shakeMs` / `breakShakePx`, tiers supply XP) — left in place, flagged here, not silently cleaned while changing shake behaviour.
+
+**Head: bigger and lower, sitting on the neck (`render/avatar.ts`: `headGeometry`, `AVATAR`).** `headRadiusTorsoFrac` 0.17 → 0.24 (head diameter ~0.48 torso lengths vs ~0.73-torso shoulders — a big cartoon head, still narrower than the shoulders). The centre is no longer the ear line: `headGeometry` puts it `headCentreAboveNeckHeadFrac` (0.55) head-radii above the shoulder (neck) line, so the chin overlaps the torso top and the head sits ON the neck with no gap, whatever the ear-to-shoulder distance of the framing (v3 centred on the ears, which left the chin ~25 px above the neck on the sim body). The face is drawn relative to the head centre, not the nose landmark — the nose rides ~0.3 torso lengths above the shoulders, so nose-anchored eyes would sit at the top rim of the bigger, lower head; `nose.x` still centres the face horizontally. The hard hat scales with the head (`drawHardHat` takes `headR`), so it grows with it. Tests: radius 0.24, centre lower than the ear line, chin overlaps the neck line (bottom below the shoulder line by less than a full radius), head top above the ears.
+
+**Two pause kinds (`main.ts`: `PauseController`, `HubOverlay`, `registerHubOverlay`).** The old `pausedByGate` boolean is a real state machine, `PauseKind = 'none' | 'manual' | 'auto'`, pure and unit-tested (`src/pause.test.ts` — separate file from `main.test.ts` on purpose: a static import of `./main` there would load the module before that file's stub-DOM `beforeAll` runs and the fullscreen wiring tests would never boot; importing `main.ts` in node does not boot the hub, the top-level `main()` call is guarded on `document` existing). Transition table (also in the `PauseController` doc comment):
+
+| from | event | to | side effect |
+|------|-------|----|-------------|
+| none | toggleManual (Space / Pause button) | manual | `onManualPause`: game pauses, hub opens, button reads ▶ Play |
+| manual | toggleManual | none | `onManualResume`: hub closes, game resumes, button reads ⏸ Pause |
+| auto | toggleManual | manual | CONVERTS to manual: the press is honoured (a dead button would be worse), the game stays paused, the hub opens; stepping back into frame no longer resumes |
+| none | gateClosed (body left frame) | auto | `onAutoPause`: game pauses, NO hub |
+| manual | gateClosed | manual | nothing — the gate must not touch a manual pause |
+| auto | gateClosed | auto | nothing |
+| auto | gateOpened (body back) | none | `onAutoResume`: game resumes |
+| manual | gateOpened | manual | nothing — coming back into frame must NOT resume a manual pause |
+| any | reset (restart / quit / new game) | none | the matching resume event (manual → `onManualResume`, auto → `onAutoResume`) |
+
+The game `pause()` / `resume()` contract is unchanged. The Pause button label: '⏸ Pause' while playing or auto-paused (pressing it during auto converts to manual), '▶ Play' while manually paused. A manual pause before the game's first start defers `start()` until resume (otherwise `start()` would un-pause the game out from under the hub). Overlay text: manual shows "Paused — press Space to resume" (canvas fallback until a hub registers — see below); auto shows "Step back into frame" on the canvas overlay and the DOM indicator (model failures keep the gate's own message). The debug HUD names the kind (`pause MANUAL — Space to resume (hub open)` / `pause AUTO — step back into frame to resume`); `drawHud` runs after the game's `ctx.restore()`, so the debug HUD never inherits the shake transform.
+
+**Hub wiring point for the coordinator (Worker B's `src/hub/townHub.ts`).** `main.ts` exports `registerHubOverlay(hub: HubOverlay | null)`; `HubOverlay` is just `{ open(): void; close(): void }`. `main.ts` never imports the hub, so there is no import cycle — the hub module imports `registerHubOverlay` and calls it. `PauseController`'s `onManualPause` / `onManualResume` call `hubOverlay?.open()` / `.close()`; the canvas "Paused — press Space to resume" fallback draws only while `hubOverlay === null` and stands down the moment one registers. Note the shape mismatch to adapt at integration: B's `TownHub` exposes `open()` / `close()` (so it satisfies `HubOverlay`) but ALSO needs `render(ctx, nowMs)` called while manually paused, `handlePointer(x, y)` / `handleKey(key)` forwarded, and construction with `{ onResume, onOpenRefiner, onReset }` — `onResume` must call the pause toggle (resume), and the coordinator must instantiate it in `main.ts` and register it. Auto pause never opens the hub.
+
+**Space → pause / W → jump rebind (`main.ts`, `mouseSource.ts`).** Spacebar was the mouse-sim jump key; it is now the pause toggle everywhere (all games, all sources — Space with a game active toggles manual pause; `event.repeat` is filtered so holding Space cannot toggle repeatedly; `preventDefault` stops page scroll). Mouse-sim jump moves to `W` (hold); `S` (duck) stays. The real-camera body jump is unaffected (landmarks, not the key). `mouseSource.ts` itself only gets the doc-comment update — the key mapping lives in `main.ts`.
+
+**Still unverified (needs a real device / Brandon).** Real-body feel of the new head size (is 0.24 too big on a real frame? does the face sit right under the hard hat?), shake settling on a real screen, whether "Step back into frame" reads better than the old gate message, Space-as-pause feel during real play (including the auto→manual conversion).
 
 ## Swing Lab v3.1b — town hub, refiner, Bix sell, local save (Worker B, Nov 4, 2026)
 

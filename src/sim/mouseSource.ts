@@ -13,7 +13,9 @@
  *   the torso, so it cannot also aim the arm.
  * - `Q` / `E`: raise the left / right arm angled outward (~35°), for
  *   testing angled shots. `A` / `D`: raise the left / right arm straight up.
- * - `Space` (hold): jump. `S` (hold): duck.
+ * - `W` (hold): jump. `S` (hold): duck. (v3.1: Space used to be jump;
+ *   Space is now the pause toggle in main.ts, so jump moved to W. The
+ *   real-camera body jump is unaffected — it comes from landmarks.)
  *
  * Two-handed clasp (Swing Lab v2): when BOTH arms are raised straight up
  * at the same time (A+D, or both mouse buttons), the hands grip one

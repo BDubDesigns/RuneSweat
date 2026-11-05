@@ -16,6 +16,7 @@ import { makePose } from '../core/poseFixture';
 import {
   AvatarRenderer,
   avatarJoints,
+  headGeometry,
   headRadiusPx,
   limbWidthPx,
   resolveOutfit,
@@ -74,8 +75,62 @@ describe('avatar scale helpers', () => {
     expect(limbWidthPx(0)).toBe(0);
   });
 
-  it('head radius is ~0.17 torso lengths', () => {
-    expect(headRadiusPx(162)).toBeCloseTo(27.54, 6);
+  it('head radius is ~0.24 torso lengths (v3.1: bigger than v3\'s 0.17)', () => {
+    expect(headRadiusPx(162)).toBeCloseTo(38.88, 6);
+  });
+});
+
+describe('headGeometry (v3.1: bigger head, sitting on the neck)', () => {
+  it('head is bigger than v3 and its centre is lower than the ear line', () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const headR = headRadiusPx(joints.torsoLengthPx);
+    const head = headGeometry(joints, headR);
+    // v3: radius 0.17 * 162 = 27.54, centre at earY - 0.15 * 27.54.
+    expect(head.r).toBeGreaterThan(0.17 * joints.torsoLengthPx);
+    const earY = (joints.leftEar.y + joints.rightEar.y) / 2;
+    expect(head.cy).toBeGreaterThan(earY);
+  });
+
+  it('chin overlaps the neck line: no gap, no floating', () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const headR = headRadiusPx(joints.torsoLengthPx);
+    const head = headGeometry(joints, headR);
+    const shoulderY = (joints.leftShoulder.y + joints.rightShoulder.y) / 2;
+    // Bottom of the head is below the shoulder line (overlap), but by
+    // less than a full radius — the head sits on the neck, it does not
+    // swallow the chest.
+    expect(head.cy + head.r).toBeGreaterThan(shoulderY);
+    expect(head.cy + head.r - shoulderY).toBeLessThan(head.r);
+  });
+
+  it('head top is above the ears, so the ears stay inside the head', () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const headR = headRadiusPx(joints.torsoLengthPx);
+    const head = headGeometry(joints, headR);
+    const earY = (joints.leftEar.y + joints.rightEar.y) / 2;
+    expect(head.cy - head.r).toBeLessThan(earY);
+  });
+
+  it('head is centred on the ear midpoint', () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const headR = headRadiusPx(joints.torsoLengthPx);
+    const head = headGeometry(joints, headR);
+    expect(head.cx).toBeCloseTo(
+      (joints.leftEar.x + joints.rightEar.x) / 2,
+      6,
+    );
   });
 });
 

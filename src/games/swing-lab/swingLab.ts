@@ -249,6 +249,40 @@ interface LoadedImage {
   loaded: boolean;
 }
 
+/**
+ * Pure: screen-shake offset for `nowMs`, in canvas px.
+ *
+ * Root cause of the v3 "HUD stays jangled" complaint: the shake was a
+ * constant-amplitude random offset that cut to zero the frame the shake
+ * ended, and the HUD text was drawn inside the same transform — so
+ * during active play (a hit every couple of seconds) the meter, phase
+ * text and chips were almost always jangled. This helper decays the
+ * amplitude linearly to exactly (0, 0) at `shakeUntilMs` — the last
+ * shaken frames are already (near-)centred, so there is no snap — and
+ * returns exactly (0, 0) once the shake is over. `render()` also draws
+ * the HUD outside the shake transform, so the HUD never moves at all.
+ * `rand` is injectable so tests can pin the offset; render passes the
+ * default (`Math.random`).
+ */
+export function shakeOffsetPx(
+  nowMs: number,
+  shakeStartMs: number,
+  shakeUntilMs: number,
+  shakeAmpPx: number,
+  rand: () => number = Math.random,
+): { x: number; y: number } {
+  if (
+    nowMs < shakeStartMs ||
+    nowMs >= shakeUntilMs ||
+    shakeUntilMs <= shakeStartMs
+  ) {
+    return { x: 0, y: 0 };
+  }
+  const remaining = (shakeUntilMs - nowMs) / (shakeUntilMs - shakeStartMs);
+  const m = shakeAmpPx * remaining;
+  return { x: (rand() * 2 - 1) * m, y: (rand() * 2 - 1) * m };
+}
+
 /** Read-only snapshot of the live state, for the debug HUD and tests. */
 export interface SwingLabSnapshot {
   ore: number;
@@ -310,6 +344,8 @@ export class SwingLabGame implements Game {
   private prevPhase: SwingPhase = 'ready';
 
   private shakeUntilMs = 0;
+  /** ms the current shake started at (0 = no shake running). */
+  private shakeStartMs = 0;
   private flashUntilMs = 0;
   private breakBannerUntilMs = 0;
   private levelBannerUntilMs = 0;
@@ -489,12 +525,18 @@ export class SwingLabGame implements Game {
     const gone = this.nodeGone(nowMs);
 
     ctx.save();
-    if (nowMs < this.shakeUntilMs) {
-      // A hit shakes harder than v2 (BREAK.shakePx, 250 ms): the shake
-      // reads on a phone screen instead of shivering by a pixel or two.
-      const m = this.shakeAmpPx;
-      ctx.translate((Math.random() * 2 - 1) * m, (Math.random() * 2 - 1) * m);
-    }
+    // Screen shake (v3.1): the WORLD shakes — node, particles, pieces,
+    // drops, pickaxe, floaters — and the offset decays to exactly (0, 0)
+    // when the shake ends (see shakeOffsetPx). The HUD below is drawn
+    // AFTER the restore, outside the shake transform, so the meter,
+    // phase text, tier chips, banners and respawn bar never move.
+    const shake = shakeOffsetPx(
+      nowMs,
+      this.shakeStartMs,
+      this.shakeUntilMs,
+      this.shakeAmpPx,
+    );
+    ctx.translate(shake.x, shake.y);
 
     if (!gone) {
       // The respawned node fades in from transparent over BREAK.fadeInMs.
@@ -507,16 +549,18 @@ export class SwingLabGame implements Game {
     this.drawNodePieces(ctx, nowMs);
     this.drawOreDrops(ctx, nowMs);
     this.drawPickaxe(ctx, body, width, height);
+    this.drawFloaters(ctx, nowMs);
+    ctx.restore();
+
+    // HUD — never shaken.
     this.drawSwingMeter(ctx, snap, nowMs);
     this.drawTierChips(ctx, width, height);
     this.drawPhaseText(ctx, snap, width, body);
     if (snap.phase === 'ready' && this.swings === 0) {
       this.drawGhostArc(ctx, width, height);
     }
-    this.drawFloaters(ctx, nowMs);
     this.drawBanners(ctx, nowMs, width, height);
     if (gone) this.drawRespawnBar(ctx, nowMs);
-    ctx.restore();
   }
 
   /**
@@ -604,6 +648,7 @@ export class SwingLabGame implements Game {
     this.lastSnapshot = null;
     this.prevPhase = 'ready';
     this.lastBody = null;
+    this.shakeStartMs = 0;
     this.shakeUntilMs = 0;
     this.flashUntilMs = 0;
     this.breakBannerUntilMs = 0;
@@ -638,6 +683,7 @@ export class SwingLabGame implements Game {
     this.sfx.crack();
     // Harder hit feedback (v3): a bigger, longer shake plus debris
     // chips flying off the rock.
+    this.shakeStartMs = nowMs;
     this.shakeUntilMs = nowMs + BREAK.shakeMs;
     this.shakeAmpPx = BREAK.shakePx;
     this.flashUntilMs = nowMs + 200;
@@ -927,6 +973,7 @@ export class SwingLabGame implements Game {
     const pips =
       '🪨'.repeat(this.nodeHits) + '⬜'.repeat(SWING.hitsPerNode - this.nodeHits);
     ctx.fillText(pips, x, y + ry + 26);
+    ctx.restore();
   }
 
   /**

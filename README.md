@@ -90,3 +90,70 @@ npm run preview # serve the production build
 See `PLAN.md` for the architecture, the model-choice trade-off
 (PoseLandmarker vs MoveNet), the auto-runner design note, and what still
 needs a real-device test with Lara.
+
+## Swing Lab v2 — avatar + presentation (Nov 4, 2026)
+
+The player on screen is now a real character, not a stickman. The hub
+draws an `AvatarRenderer` (`src/render/avatar.ts`) for every game
+whenever landmarks exist: a chunky miner in a white tank top,
+heart-pattern boxers, and a yellow hard hat, drawn as canvas vector
+shapes from the raw landmarks (per-joint One Euro smoothing lives in
+the renderer — `BodyState` has no joint fields). The stickman skeleton
+is a debug overlay only: on top of the avatar, only while the debug HUD
+is on (D key). The default outfit lives in `config.ts` as `OUTFIT`
+(slots: top / bottoms / skin / hat) — a future outfit swaps the same
+slots; see `PLAN.md` for the slot contract.
+
+Swing Lab v2 presentation changes: the ore node sits front-center at
+chair/waist height in front of the avatar (`nodeCenterForBody` derives
+it from the body's canvas hip position), so the rock occludes the
+avatar's waist and below; the pickaxe is gripped in the right hand at
+all times (`pickaxeAnchorForBody`: right wrist + right forearm angle,
+never the wrist midpoint); the swing meter is bigger, hit floaters are
+bigger with a shake you can actually see, the ready line reads "Both
+hands up together, then chop down in front of you!", and the ghost arc
+shows two hands together rising then chopping straight down in front.
+When the body is sideways the phase text adds a hint — "Face the camera
+— I can't see you from the side" — advisory only, never a block.
+
+## Swing Lab v2 — true two-handed machine (Worker B, Nov 4, 2026)
+
+The swing machine (`src/games/swing-lab/swingMachine.ts`) is two-handed
+only now. Both wrists must rise above the windup line together, hands
+clasped on one handle, and chop straight down in front of the body
+through waist level — the strike line moved from chest level (0.5) to
+0.85 torso lengths below the shoulder (shoulder-to-hip is 1.0; the waist
+and the node sit just above the hips). Single-arm swings no longer count:
+a solo arm completing a fast drop is a weak swing, "Both hands together!"
+(`hands-apart`). The drop is judged on the pair — the velocity that
+counts is the MINIMUM of the two arms' peak downward velocities — and
+hands separating mid-drop fire `hands-apart` at once. Hits still emit
+`handedness: 'two-handed'`. Windup progress now reads from the LOWER
+wrist. Kept: 0.6 windup line, 3.0 torso/s strike velocity, 700 ms
+cooldown, 300 ms weak re-arm.
+
+Two fixes worth knowing: (1) v1 misread a settled ~0.5 s hold as a flick
+— the drop's first fast frames still read above the windup line, and the
+flick rule fired on them. The rule now only fires after the pair has
+dropped BELOW the windup line. The mouse-sim pipeline test holds a full
+500 ms to lock this in. (2) `BodyState` gained
+`shoulderWidthTorsoFrac` (One-Euro-smoothed shoulder width / torso
+length, 0 with no body); `SwingSnapshot.facingOk` is false when a body
+is present and the ratio is below `FACING.minShoulderWidthTorsoFrac`
+(0.6: front reads ~0.7-1.0, profile ~0.3-0.4). Hint only, never a gate.
+
+Smoothing retune: wrists got their own One Euro params
+(`BODY.wristOneEuroMinCutoff` 1.5, `beta` 0.05, `dCutoff` 1.0 — was the
+shared 1.0 / 0.02 / 1.0). Measured on the sim pipeline, new machine +
+new sim, only the wrist params varying: release-to-hit 352 ms -> 256 ms
+(300 ms hold) and 368 ms -> 256 ms (500 ms hold); peak velocity 6.65 ->
+9.59 and 8.07 -> 10.84 torso/s. `SWING.wristVelEmaAlpha` stays 0.35 —
+no real 33 Hz noise data in the sandbox to justify moving it.
+
+Mouse sim: A+D (or both buttons) now clasps — both wrists follow one
+handle point on the midline from overhead to waist height, latched until
+500 ms after both arms are fully down (the tracker lags the raw motion;
+releasing the latch at the bottom would snap the smoothed wrists apart
+and trip `hands-apart` before the hit lands). Single-arm and angled
+(Q/E) raises still follow their own arcs. Between chops the hands rest
+together at waist height, not at the sides.

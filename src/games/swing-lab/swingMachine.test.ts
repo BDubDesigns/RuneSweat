@@ -1,39 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import { SWING } from '../../core/config';
-import { SwingMachine, type SwingBodyInput } from './swingMachine';
+import {
+  facingOkFor,
+  SwingMachine,
+  type SwingBodyInput,
+} from './swingMachine';
 
 /**
  * Synthetic body for the machine: heights in torso lengths above the
  * shoulder (+ = overhead, - = below), velocities in torso lengths/sec
- * (+ = moving down). The machine only reads wrist Y / velocity /
- * shoulder Y / torso length, so a fake body is exact here.
+ * (+ = moving down), wrist X offsets in torso lengths from the body
+ * midline. The machine only reads wrist X/Y / velocity / shoulder Y /
+ * torso length / shoulder width, so a fake body is exact here.
  */
 function makeBody(options: {
   leftHeight?: number;
   rightHeight?: number;
   leftVel?: number;
   rightVel?: number;
+  /** Wrist X offsets from the midline, in torso lengths. Default ±0.1: clasped. */
+  leftWristXTorso?: number;
+  rightWristXTorso?: number;
+  shoulderWidthTorsoFrac?: number;
   present?: boolean;
 } = {}): SwingBodyInput {
   const torsoLength = 0.3;
   const shoulderY = 0.25;
+  const midX = 0.5;
   const leftHeight = options.leftHeight ?? -1;
   const rightHeight = options.rightHeight ?? -1;
   return {
     present: options.present ?? true,
     torsoLength,
     shoulderY,
+    leftWristX: midX + (options.leftWristXTorso ?? -0.1) * torsoLength,
+    rightWristX: midX + (options.rightWristXTorso ?? 0.1) * torsoLength,
     leftWristY: shoulderY - leftHeight * torsoLength,
     rightWristY: shoulderY - rightHeight * torsoLength,
     leftWristVelY: (options.leftVel ?? 0) * torsoLength,
     rightWristVelY: (options.rightVel ?? 0) * torsoLength,
+    shoulderWidthTorsoFrac: options.shoulderWidthTorsoFrac ?? 1.0,
   };
 }
 
 /** Rest pose: both arms hanging, still. */
 const REST = makeBody();
 
-/** Both arms overhead, still. */
+/** Both arms overhead, hands clasped, still. */
 const WOUND = makeBody({ leftHeight: 0.9, rightHeight: 0.9 });
 
 /** Both arms dropping fast through mid-air (above the strike line). */
@@ -44,21 +57,47 @@ const DROPPING_FAST = makeBody({
   rightVel: 5,
 });
 
-/** Both arms past the strike line, still moving fast. */
+/** Both arms past the strike line (waist level), still moving fast. */
 const CROSSED_FAST = makeBody({
-  leftHeight: -0.6,
-  rightHeight: -0.6,
+  leftHeight: -1.0,
+  rightHeight: -1.0,
   leftVel: 5,
   rightVel: 5,
 });
 
 /** Both arms past the strike line, moving slowly. */
 const CROSSED_SLOW = makeBody({
-  leftHeight: -0.6,
-  rightHeight: -0.6,
+  leftHeight: -1.0,
+  rightHeight: -1.0,
   leftVel: 1,
   rightVel: 1,
 });
+
+/**
+ * Both arms at chest level (-0.6): past the OLD strike line (0.5) but
+ * above the new waist-level line (0.85). A chop that stops here must
+ * NOT count.
+ */
+const AT_CHEST_FAST = makeBody({
+  leftHeight: -0.6,
+  rightHeight: -0.6,
+  leftVel: 5,
+  rightVel: 5,
+});
+
+/** Wrists a shoulder-width apart (0.8 torso lengths): hands NOT together. */
+function handsApart(options: {
+  leftHeight?: number;
+  rightHeight?: number;
+  leftVel?: number;
+  rightVel?: number;
+} = {}): SwingBodyInput {
+  return makeBody({
+    ...options,
+    leftWristXTorso: -0.4,
+    rightWristXTorso: 0.4,
+  });
+}
 
 describe('SwingMachine', () => {
   it('counts a full two-handed swing as one HIT', () => {
@@ -77,23 +116,37 @@ describe('SwingMachine', () => {
     expect(machine.currentPhase).toBe('recover');
   });
 
-  it('accepts a single-arm overhead swing', () => {
+  it('does NOT wind up on one arm alone, and a solo drop is "Both hands together!"', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    // One wrist overhead, the other at rest: no windup yet — wait.
+    expect(
+      machine.update(makeBody({ leftHeight: 0.9 }), 100),
+    ).toBeNull();
+    expect(machine.currentPhase).toBe('ready');
+    expect(
+      machine.update(makeBody({ leftHeight: 0.3, leftVel: 5 }), 200),
+    ).toBeNull();
+    expect(machine.currentPhase).toBe('ready');
+    // The solo arm completes a full fast drop through the strike line.
+    const event = machine.update(
+      makeBody({ leftHeight: -1.0, leftVel: 5 }),
+      300,
+    );
+    expect(event).toEqual({
+      kind: 'weak',
+      reason: 'hands-apart',
+      message: 'Both hands together!',
+    });
+  });
+
+  it('says nothing when a solo arm is lowered slowly', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
     machine.update(makeBody({ leftHeight: 0.9 }), 100);
-    expect(machine.currentPhase).toBe('windup');
-    machine.update(
-      makeBody({ leftHeight: 0.3, leftVel: 5 }),
-      200,
-    );
-    const event = machine.update(
-      makeBody({ leftHeight: -0.6, leftVel: 5 }),
-      300,
-    );
-    expect(event?.kind).toBe('hit');
-    if (event?.kind === 'hit') {
-      expect(event.handedness).toBe('left');
-    }
+    machine.update(makeBody({ leftHeight: 0.3, leftVel: 1 }), 200);
+    expect(machine.update(makeBody({ leftHeight: -1.0, leftVel: 1 }), 300)).toBeNull();
+    expect(machine.snapshot().lastEvent).toBeNull();
   });
 
   it('counts two arms swinging together as ONE hit, not two', () => {
@@ -108,10 +161,10 @@ describe('SwingMachine', () => {
     expect(machine.update(CROSSED_FAST, 500)).toBeNull();
   });
 
-  it('rejects a partway raise dropped fast: "Swing bigger!"', () => {
+  it('rejects a partway pair raise dropped fast: "Swing bigger!"', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
-    // Raise partway: above the shoulders (0.4) but below windup (0.6).
+    // Raise BOTH partway: above the shoulders (0.4) but below windup (0.6).
     expect(
       machine.update(
         makeBody({ leftHeight: 0.4, rightHeight: 0.4 }),
@@ -135,6 +188,19 @@ describe('SwingMachine', () => {
     });
   });
 
+  it('says nothing for a partway raise of ONE arm dropped fast', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    // Only the left arm rises partway; the right never leaves rest.
+    machine.update(makeBody({ leftHeight: 0.4 }), 100);
+    machine.update(
+      makeBody({ leftHeight: 0.1, leftVel: 5 }),
+      200,
+    );
+    expect(machine.update(REST, 300)).toBeNull();
+    expect(machine.snapshot().lastEvent).toBeNull();
+  });
+
   it('rejects a windup dropped slowly: "Swing faster!"', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
@@ -153,7 +219,27 @@ describe('SwingMachine', () => {
     });
   });
 
-  it('says nothing when a partway raise is lowered slowly', () => {
+  it('judges the pair on the SLOWER arm: one fast arm cannot carry the swing', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    // Left chops fast, right drifts down slowly.
+    machine.update(
+      makeBody({ leftHeight: 0.3, rightHeight: 0.3, leftVel: 6, rightVel: 1 }),
+      200,
+    );
+    const event = machine.update(
+      makeBody({ leftHeight: -1.0, rightHeight: -1.0, leftVel: 6, rightVel: 1 }),
+      300,
+    );
+    expect(event).toEqual({
+      kind: 'weak',
+      reason: 'too-slow',
+      message: 'Swing faster!',
+    });
+  });
+
+  it('says nothing when a partway pair raise is lowered slowly', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
     machine.update(
@@ -178,6 +264,75 @@ describe('SwingMachine', () => {
         100,
       ),
     ).toBeNull();
+  });
+
+  it('rejects a wound pair that separates during the drop: "Both hands together!"', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    // Hands clasped at the top, apart by mid-drop while chopping fast.
+    const event = machine.update(
+      handsApart({ leftHeight: 0.3, rightHeight: 0.3, leftVel: 5, rightVel: 5 }),
+      200,
+    );
+    expect(event).toEqual({
+      kind: 'weak',
+      reason: 'hands-apart',
+      message: 'Both hands together!',
+    });
+  });
+
+  it('rejects hands apart at the strike line, even on a slow drop', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    // Slow drop, hands together: no separation event mid-drop…
+    expect(
+      machine.update(
+        makeBody({ leftHeight: 0.3, rightHeight: 0.3, leftVel: 1, rightVel: 1 }),
+        200,
+      ),
+    ).toBeNull();
+    // …but the wrists are apart when they cross the line.
+    const event = machine.update(
+      handsApart({ leftHeight: -1.0, rightHeight: -1.0, leftVel: 1, rightVel: 1 }),
+      300,
+    );
+    expect(event).toEqual({
+      kind: 'weak',
+      reason: 'hands-apart',
+      message: 'Both hands together!',
+    });
+  });
+
+  it('rejects one wrist crossing while the other stays up overhead', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    machine.update(DROPPING_FAST, 200);
+    // Left hand drops to the waist; right hand stays overhead: split.
+    const event = machine.update(
+      makeBody({ leftHeight: -1.0, rightHeight: 0.9, leftVel: 5, rightVel: 0 }),
+      300,
+    );
+    expect(event).toEqual({
+      kind: 'weak',
+      reason: 'hands-apart',
+      message: 'Both hands together!',
+    });
+  });
+
+  it('does NOT count a chop that stops at chest level (old strike line)', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    machine.update(DROPPING_FAST, 200);
+    expect(machine.currentPhase).toBe('strike');
+    // -0.6 crossed the v1 line (0.5) but not the v2 waist line (0.85).
+    expect(machine.update(AT_CHEST_FAST, 300)).toBeNull();
+    expect(machine.currentPhase).toBe('strike');
+    // Following through to the waist counts.
+    expect(machine.update(CROSSED_FAST, 400)?.kind).toBe('hit');
   });
 
   it('blocks a double-count from one swing during the cooldown', () => {
@@ -239,6 +394,32 @@ describe('SwingMachine', () => {
     });
   });
 
+  it('does NOT call a settled windup starting its drop a flick', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    // A ~0.5 s hold: the wrists are settled overhead, then the drop
+    // starts fast — but the first fast frames still read ABOVE the
+    // windup line. v1 misread that as "pulled back up" and swallowed
+    // the swing with "Swing bigger!".
+    expect(
+      machine.update(
+        makeBody({ leftHeight: 0.8, rightHeight: 0.8, leftVel: 5, rightVel: 5 }),
+        200,
+      ),
+    ).toBeNull();
+    expect(machine.currentPhase).toBe('strike');
+    expect(
+      machine.update(
+        makeBody({ leftHeight: 0.7, rightHeight: 0.7, leftVel: 5, rightVel: 5 }),
+        300,
+      ),
+    ).toBeNull();
+    expect(machine.currentPhase).toBe('strike');
+    machine.update(DROPPING_FAST, 400);
+    expect(machine.update(CROSSED_FAST, 500)?.kind).toBe('hit');
+  });
+
   it('produces no swing with no body, and resets cleanly', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
@@ -255,9 +436,12 @@ describe('SwingMachine', () => {
   it('lets the second arm join the windup late (still two-handed)', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
+    // One arm up alone: no windup yet — the machine waits.
     machine.update(makeBody({ leftHeight: 0.9 }), 100);
-    expect(machine.currentPhase).toBe('windup');
+    expect(machine.currentPhase).toBe('ready');
+    // The second arm joins: now the pair is wound.
     machine.update(makeBody({ leftHeight: 0.9, rightHeight: 0.9 }), 200);
+    expect(machine.currentPhase).toBe('windup');
     machine.update(DROPPING_FAST, 300);
     const event = machine.update(CROSSED_FAST, 400);
     expect(event?.kind).toBe('hit');
@@ -266,12 +450,14 @@ describe('SwingMachine', () => {
     }
   });
 
-  it('reports windup progress from the highest wrist', () => {
+  it('reports windup progress from the LOWER wrist', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
+    // Left is at 0.3, right only at 0.1: the pair is only as wound as
+    // its lower hand.
     machine.update(makeBody({ leftHeight: 0.3, rightHeight: 0.1 }), 100);
     expect(machine.snapshot().windupProgress).toBeCloseTo(
-      0.3 / SWING.windupHeightTorsoFrac,
+      0.1 / SWING.windupHeightTorsoFrac,
       5,
     );
     machine.update(WOUND, 200);
@@ -288,5 +474,47 @@ describe('SwingMachine', () => {
     const snap = machine.snapshot();
     expect(snap.leftVel).toBeCloseTo(4.5, 5);
     expect(snap.rightVel).toBeCloseTo(-2, 5);
+  });
+
+  it('says nothing when the pair hovers overhead with hands apart and still', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    // Arms spread wide at the top but not moving: no swing in flight,
+    // so no hands-apart feedback yet — that fires on the drop.
+    expect(
+      machine.update(
+        handsApart({ leftHeight: 0.9, rightHeight: 0.9 }),
+        200,
+      ),
+    ).toBeNull();
+    expect(machine.currentPhase).toBe('windup');
+  });
+});
+
+describe('facingOkFor', () => {
+  it('is true with no body (null width)', () => {
+    expect(facingOkFor(null)).toBe(true);
+  });
+
+  it('is true front-facing, at the threshold, and false in profile', () => {
+    expect(facingOkFor(1.0)).toBe(true);
+    expect(facingOkFor(0.73)).toBe(true);
+    expect(facingOkFor(0.6)).toBe(true);
+    expect(facingOkFor(0.59)).toBe(false);
+    expect(facingOkFor(0.3)).toBe(false);
+  });
+});
+
+describe('SwingMachine facingOk snapshot', () => {
+  it('is true with no body and front-facing, false when turned sideways', () => {
+    const machine = new SwingMachine();
+    expect(machine.snapshot().facingOk).toBe(true);
+    machine.update(REST, 0);
+    expect(machine.snapshot().facingOk).toBe(true);
+    machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 100);
+    expect(machine.snapshot().facingOk).toBe(false);
+    expect(machine.update(null, 200)).toBeNull();
+    expect(machine.snapshot().facingOk).toBe(true);
   });
 });

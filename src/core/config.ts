@@ -177,6 +177,24 @@ export const BODY = {
   oneEuroBeta: 0.02,
   oneEuroDCutoff: 1.0,
   /**
+   * Wrist-only One Euro tuning (Nov 4, 2026, Swing Lab v2). The wrists
+   * are the fastest joints in this game: a chop covers ~1.5 torso
+   * lengths in ~0.25 s, and the machine judges the swing on the
+   * smoothed wrist velocity, so a 1.0 Hz filter (time constant ~0.16 s,
+   * most of the chop) lags the wrist and attenuates the peak. 1.5 Hz
+   * cuts the at-rest time constant to ~0.11 s while still strongly
+   * attenuating frame-to-frame landmark jitter, which lives near the
+   * Nyquist rate (~16 Hz at 33 Hz inference). Beta 0.05 (up from 0.02)
+   * lets the cutoff open a little more during the chop itself. Deliberately
+   * modest: with no real-camera jitter data in the sandbox, pushing to
+   * 2-3 Hz would be a guess. Torso / arm angles keep the Spider-Man
+   * values — they steer the ship and aim shots, where steadiness matters
+   * more than chop latency. See the Swing Lab v2 note in PLAN.md.
+   */
+  wristOneEuroMinCutoff: 1.5,
+  wristOneEuroBeta: 0.05,
+  wristOneEuroDCutoff: 1.0,
+  /**
    * An arm counts as RAISED when the wrist is above the shoulder by more
    * than this fraction of torso length (shoulder-mid to hip-mid distance).
    */
@@ -259,6 +277,22 @@ export const DANCE = {
   pointsGood: 150,
 } as const;
 
+/** Face-the-camera hint (Swing Lab v2, advisory only — never a gate). */
+export const FACING = {
+  /**
+   * Minimum shoulder-width-to-torso-length ratio for "facing the
+   * camera". Front-facing shoulders read ~0.7-1.0 torso lengths wide
+   * (the mouse sim is 0.22 / 0.30 = 0.73; a typical adult's
+   * shoulder-width-to-torso ratio is ~0.8); a side profile collapses
+   * toward ~0.3-0.4 as one shoulder hides behind the other. 0.6 splits
+   * the gap with margin on both sides. Below it the game shows
+   * "Face the camera — I can't see you from the side" and nothing else:
+   * the swing machine keeps working, because a turned player can still
+   * chop — they just chop badly.
+   */
+  minShoulderWidthTorsoFrac: 0.6,
+} as const;
+
 /** Swing Lab tuning (Active RuneSpace Mining prototype, Slice 1). */
 export const SWING = {
   /**
@@ -276,10 +310,30 @@ export const SWING = {
    */
   partialHeightTorsoFrac: 0.25,
   /**
-   * Strike line: chest level, this far BELOW the shoulder as a fraction of
-   * torso length. A counted hit crosses this line on the way down.
+   * Strike line: waist height, this far BELOW the shoulder as a fraction
+   * of torso length. A counted hit crosses this line on the way down.
+   *
+   * Was 0.5 (chest level) in v1; moved to 0.85 in Swing Lab v2. The
+   * shoulder-to-hip distance is 1.0 torso lengths by definition, and
+   * the waist sits just above the hips at ~0.85-0.9: the Nov 4 playtest
+   * frames show Brandon's clasped hands finishing at the top of the
+   * wooden chair directly in front of him, and the chair-back top is
+   * waist height. 0.85 (not 0.9) leaves a little margin above the hip
+   * line, so a chop to the node — which sits front-center at waist
+   * height — counts without demanding the wrists reach the hips. A chop
+   * that stops at chest level (-0.5) no longer counts.
    */
-  strikeLineTorsoFrac: 0.5,
+  strikeLineTorsoFrac: 0.85,
+  /**
+   * Hands-together line (Swing Lab v2): the wrists count as gripping
+   * one pickaxe handle when they are within this many torso lengths of
+   * each other (2D distance, smoothed wrist positions). Clasped hands
+   * read ~0.05-0.15 apart, so 0.5 gives ~3x slack for tracking noise
+   * and a looser grip, while a shoulder-width spread (the mouse sim's
+   * shoulder width is 0.73 torso lengths) fails it. Checked during
+   * windup / strike and judged at the strike line.
+   */
+  handsTogetherTorsoFrac: 0.5,
   /**
    * Strike velocity: peak downward wrist velocity during the drop, in
    * torso lengths per second (wristVelY / torsoLength). A real pickaxe
@@ -313,6 +367,11 @@ export const SWING = {
   /**
    * Wrist-velocity EMA smoothing (bodyState.ts): how much of each new
    * frame-to-frame velocity sample survives. 1 = raw, 0 = frozen.
+   * Kept at 0.35 in Swing Lab v2: the EMA already averages ~3 frames
+   * at 33 Hz, the machine judges PEAK velocity (which tolerates lag),
+   * and raising it without real 33 Hz noise data would trade
+   * unmeasured noise for unmeasured speed. Revisit after a phone
+   * playtest if strike detection gets noisy.
    */
   wristVelEmaAlpha: 0.35,
   /** Whoosh: falling sweep as the swing comes down. */
@@ -418,4 +477,71 @@ export const SOURCE_SELECTION = {
   queryParam: 'source',
   /** Used when the query parameter is absent or unrecognized. */
   defaultSource: 'camera',
+} as const;
+
+/**
+ * Avatar outfit slots — the start of the "outfits show on the body"
+ * system (Active RuneSpace). A future outfit swaps the same slots; the
+ * renderer (`render/avatar.ts`) reads only these fields, never hardcoded
+ * colours, so a new outfit is a new `AvatarOutfit` value, not new draw
+ * code.
+ *
+ * - `top`: the torso garment. `'tank'` is the default mining look: a
+ *   white tank top with straps over the shoulders.
+ * - `bottoms`: the leg garment. `'boxers'` is the default: heart-pattern
+ *   boxers (red/pink base, `patternColor` hearts).
+ * - `skin`: the bare-limb / face tone.
+ * - `hat`: headgear. `'hard-hat'` is the default mining look (yellow);
+ *   `'none'` draws the bare head.
+ */
+export interface AvatarOutfit {
+  top: {
+    style: 'tank' | 'tee';
+    color: string;
+    strapColor: string;
+  };
+  bottoms: {
+    style: 'boxers' | 'shorts';
+    color: string;
+    pattern: 'hearts' | 'plain';
+    patternColor: string;
+  };
+  skin: {
+    tone: string;
+  };
+  hat: {
+    style: 'hard-hat' | 'none';
+    color: string;
+  };
+}
+
+/**
+ * Default outfit (Nov 4, 2026 playtest redesign): white tank top,
+ * heart-pattern boxers, yellow hard hat. This is what Brandon asked the
+ * miner to wear — a real SVG-person look, not the stickman.
+ */
+export const OUTFIT: AvatarOutfit = {
+  top: { style: 'tank', color: '#f8f8f2', strapColor: '#f8f8f2' },
+  bottoms: {
+    style: 'boxers',
+    color: '#e5484d',
+    pattern: 'hearts',
+    patternColor: '#ffffff',
+  },
+  skin: { tone: '#e8b98a' },
+  hat: { style: 'hard-hat', color: '#ffd166' },
+};
+
+/** Avatar renderer tuning. Lengths are fractions of torso length. */
+export const AVATAR = {
+  /** Limb capsule width, as a fraction of torso length. */
+  limbWidthTorsoFrac: 0.16,
+  /** Head radius, as a fraction of torso length. */
+  headRadiusTorsoFrac: 0.17,
+  /** Heart size on the boxers, as a fraction of torso length. */
+  heartSizeTorsoFrac: 0.09,
+  /** One Euro smoothing for avatar joints (same tuning as BODY). */
+  oneEuroMinCutoff: 1.0,
+  oneEuroBeta: 0.02,
+  oneEuroDCutoff: 1.0,
 } as const;

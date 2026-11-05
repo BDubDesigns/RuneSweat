@@ -113,6 +113,14 @@ export interface BodyState {
   torsoY: number;
   /** Shoulder-mid to hip-mid distance, video-space units. */
   torsoLength: number;
+  /**
+   * Shoulder-to-shoulder distance as a fraction of torso length
+   * (One-Euro-smoothed like the other tracker fields, 0 when no body).
+   * Front-facing shoulders read ~0.7-1.0; a side profile collapses
+   * toward ~0.3-0.4. Feeds the face-the-camera HINT only
+   * (`FACING.minShoulderWidthTorsoFrac`) — never the body gate.
+   */
+  shoulderWidthTorsoFrac: number;
   /** Mean visibility of shoulders + hips (0..1). */
   visibilityScore: number;
   leftArm: ArmState;
@@ -332,11 +340,17 @@ export class BodyStateTracker {
     dCutoff: BODY.oneEuroDCutoff,
   });
   private readonly leftWristFilter = new OneEuroFilter2D({
-    minCutoff: BODY.oneEuroMinCutoff,
-    beta: BODY.oneEuroBeta,
-    dCutoff: BODY.oneEuroDCutoff,
+    minCutoff: BODY.wristOneEuroMinCutoff,
+    beta: BODY.wristOneEuroBeta,
+    dCutoff: BODY.wristOneEuroDCutoff,
   });
   private readonly rightWristFilter = new OneEuroFilter2D({
+    minCutoff: BODY.wristOneEuroMinCutoff,
+    beta: BODY.wristOneEuroBeta,
+    dCutoff: BODY.wristOneEuroDCutoff,
+  });
+  /** Shoulder-width ratio smoothing (standard BODY params, not wrist). */
+  private readonly shoulderWidthFilter = new OneEuroFilter({
     minCutoff: BODY.oneEuroMinCutoff,
     beta: BODY.oneEuroBeta,
     dCutoff: BODY.oneEuroDCutoff,
@@ -367,6 +381,7 @@ export class BodyStateTracker {
     this.shoulderYFilter.reset();
     this.leftWristFilter.reset();
     this.rightWristFilter.reset();
+    this.shoulderWidthFilter.reset();
     this.prevLeftWristY = null;
     this.prevRightWristY = null;
     this.prevWristTSeconds = null;
@@ -420,6 +435,7 @@ export class BodyStateTracker {
         torsoX: 0.5,
         torsoY: 0.5,
         torsoLength: 0,
+        shoulderWidthTorsoFrac: 0,
         visibilityScore: 0,
         leftArm: neutralArm('left'),
         rightArm: neutralArm('right'),
@@ -463,6 +479,7 @@ export class BodyStateTracker {
         torsoX: 0.5,
         torsoY: 0.5,
         torsoLength: 0,
+        shoulderWidthTorsoFrac: 0,
         visibilityScore: 0,
         leftArm: neutralArm('left'),
         rightArm: neutralArm('right'),
@@ -489,6 +506,13 @@ export class BodyStateTracker {
     const tSeconds = timestampMs / 1000;
     const torso = this.torsoFilter.filter(hipMid.x, hipMid.y, tSeconds);
     const shoulderY = this.shoulderYFilter.filter(shoulderMid.y, tSeconds);
+    // Shoulder-width ratio: raw shoulder distance over torso length,
+    // One-Euro-smoothed. The filter's first sample passes through raw,
+    // so a fresh body reads its true ratio immediately.
+    const shoulderWidthTorsoFrac = this.shoulderWidthFilter.filter(
+      landmarkDistance(ls, rs) / torsoLength,
+      tSeconds,
+    );
 
     // Wrist positions (smoothed) + vertical velocities. Velocity is the
     // frame-to-frame change of the SMOOTHED wrist Y over the timestamp
@@ -580,6 +604,7 @@ export class BodyStateTracker {
       torsoX: torso.x,
       torsoY: torso.y,
       torsoLength,
+      shoulderWidthTorsoFrac,
       visibilityScore,
       leftArm,
       rightArm,

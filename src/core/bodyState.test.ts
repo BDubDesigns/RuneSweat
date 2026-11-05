@@ -142,6 +142,34 @@ describe('BodyStateTracker', () => {
   });
 });
 
+describe('BodyStateTracker shoulderWidthTorsoFrac', () => {
+  it('reads ~0.73 front-facing (sim shoulder width / torso length)', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(makePose({}), 1000));
+    // SIM.shoulderWidth 0.22 / SIM.torsoLength 0.30 = 0.733. The filter
+    // passes its first sample through raw, so one frame reads it exactly.
+    expect(state.shoulderWidthTorsoFrac).toBeCloseTo(0.22 / 0.3, 2);
+  });
+
+  it('collapses toward ~0.2 for a narrow (side-profile) shoulder line', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({});
+    // Squeeze the shoulders together around the same midpoint: the
+    // torso length (shoulder-mid to hip-mid) does not change.
+    pose[PoseLandmark.LEFT_SHOULDER] = lm(0.5 - 0.03, 0.25);
+    pose[PoseLandmark.RIGHT_SHOULDER] = lm(0.5 + 0.03, 0.25);
+    const state = tracker.update(makeFrame(pose, 1000));
+    expect(state.shoulderWidthTorsoFrac).toBeCloseTo(0.06 / 0.3, 2);
+    expect(state.torsoLength).toBeCloseTo(0.3, 2);
+  });
+
+  it('is 0 when no body is present', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(null, 1000));
+    expect(state.shoulderWidthTorsoFrac).toBe(0);
+  });
+});
+
 describe('BodyStateTracker bodyUsable', () => {
   it('is usable when shoulders + hips are all confidently visible', () => {
     const tracker = new BodyStateTracker();

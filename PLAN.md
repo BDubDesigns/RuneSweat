@@ -383,3 +383,145 @@ freeze. Watch for: inference Hz staying above 0 through a full session
 recurs, the HUD's error count / last error and the delegate line are
 the first things to read), and whether the 2000 ms staleness threshold
 ever trips while the feed is healthy.
+
+## Swing Lab v2 — avatar + presentation (Nov 4, 2026)
+
+**Avatar (`src/render/avatar.ts`).** `AvatarRenderer` draws the player
+as a chunky character from raw landmarks: thick capsule limbs (~0.16
+torso lengths wide), tapered torso in the outfit's top, hips/upper legs
+in the outfit's bottoms, dot eyes + smile, simple feet, and the
+outfit's hat. Draw order: far arm, far leg, torso, bottoms, near leg,
+near arm, head + hat. No body: draws nothing. Per-joint One Euro
+smoothing state lives in the renderer (same tuning as `BODY`); games
+never see joints. Pure helpers are unit-tested (`avatarJoints`,
+`limbWidthPx`, `headRadiusPx`, `resolveOutfit`); canvas drawing itself
+is untestable in Node, so the look is verified by a real-device
+playtest, not by tests.
+
+**Outfit slots (`config.ts`: `OUTFIT`, `AvatarOutfit`).** The start of
+the "outfits show on the body" system. Slots: `top` (style
+`tank`/`tee`, colour, strap colour), `bottoms` (style `boxers`/`shorts`,
+colour, pattern `hearts`/`plain`, pattern colour), `skin` (tone), `hat`
+(style `hard-hat`/`none`, colour). `resolveOutfit(partial)` swaps
+whole slots and keeps the rest at the default. Default: white tank top,
+red heart-pattern boxers, yellow hard hat — Brandon's Nov 4 redesign
+(reference frames in `docs/playtest-nov4/`).
+
+**Node + pickaxe (`src/games/swing-lab/swingLab.ts`).** The node is
+front-center at waist height: `nodeCenterForBody(body, w, h)` puts `x`
+at the hip-centre canvas x and `y` half a rock radius below the hips
+(rock-top ≈ waist), so the rock occludes the avatar's waist and below.
+No body: stage centre, waiting. The pickaxe is gripped in the right
+hand at all times: `pickaxeAnchorForBody(body, w, h)` returns the right
+wrist (mirrored) + the handle direction along the right forearm from
+`body.rightArm.angleDeg`, unclamped — head up when raised, head down at
+rest. The old midpoint-of-wrists logic and the old helmet drawing are
+gone (the avatar draws the hard hat). The machine still only ever emits
+`'two-handed'` hits; `HANDEDNESS_LABELS` is untouched.
+
+**Facing hint (contract with the swing-machine rework).** `SwingSnapshot`
+gains a `facingOk: boolean` field (Worker B). `drawPhaseText` reads it
+via `snapshotFacingOk()` — a structural `'facingOk' in snap` check, so
+the code compiles and runs with or without the field present — and
+shows "Face the camera — I can't see you from the side" under the phase
+text when the body is present and `facingOk` is false. Hint only, never
+a block.
+
+**Still unverified in the sandbox:** the avatar's look on a real phone
+screen (proportions, heart pattern legibility, hard-hat placement) and
+the two-handed chop feel on a real body — both need Brandon's phone
+retest. Canvas drawing is covered only by a stub-context smoke test
+(path runs without throwing), not by visual tests.
+
+## Swing Lab v2 — two-handed machine, facing hint, smoothing (Worker B, Nov 4, 2026)
+
+### Machine (`swingMachine.ts`, `SWING`, `FACING`)
+- Two-handed only. Windup needs BOTH wrists above the windup line
+  (0.6, unchanged) at the same time; one wrist crossing early is not a
+  windup and is not punished — the machine waits. The second arm may
+  join late.
+- Hands-together: wrists within `SWING.handsTogetherTorsoFrac` (0.5
+  torso lengths, 2D distance) — clasped hands read ~0.05-0.15, a
+  shoulder-width spread (0.73) fails. Checked during windup/strike and
+  judged at the line; separating during a fast drop fires `hands-apart`
+  ("Both hands together!") at once. A solo arm completing a fast drop
+  while the other never wound is also `hands-apart`; a slow solo lower
+  is silence.
+- Strike line `SWING.strikeLineTorsoFrac` 0.5 -> 0.85: waist height, not
+  chest. Reasoning: shoulder-to-hip is 1.0 torso lengths; the Nov 4
+  frames show Brandon's clasped hands finishing at the top of the
+  wooden chair in front of him, and the chair-back top is waist height
+  (~0.8-0.85); 0.85 (not 0.9) leaves margin above the hip line so a
+  chop to the waist-high node counts without demanding hip-level wrists.
+  A chop stopping at chest level (-0.6) no longer counts (tested).
+- Hit velocity is the MINIMUM of the two arms' peak downward
+  velocities (peak, not instantaneous, as before). One arm cannot carry
+  the swing; with clasped hands min ≈ mean. Threshold stays 3.0.
+- Partial attempts are pair attempts: BOTH wrists above the partial
+  line (0.25), fast drop to rest = "Swing bigger!", slow = silence.
+  One arm rising partway alone is nothing.
+- Flick rule fixed: v1 fired "Swing bigger!" when a settled (~0.5 s)
+  hold started dropping, because the first fast frames still read above
+  the windup line. The rule now requires the pair to have dropped BELOW
+  the windup line first (`droppedBelowWindup` guard; same guard on the
+  solo attempt). Pipeline test holds 500 ms to lock this in.
+- `SwingHandedness` kept as-is; every hit emits `'two-handed'`.
+  `SwingBodyInput` gained `leftWristX` / `rightWristX` (hands-together)
+  and `shoulderWidthTorsoFrac` (facing). `SwingSnapshot` gained
+  `facingOk`; `windupProgress` reads from the LOWER wrist now.
+- Cooldown 700 ms, weak re-arm 300 ms, +1 ore / +10 XP / 5 hits per
+  node unchanged (they live in the game, not the machine).
+
+### Facing hint (`BodyState.shoulderWidthTorsoFrac`, `FACING`)
+- Tracker computes shoulder-to-shoulder distance / torso length,
+  One-Euro-smoothed with the standard BODY params, 0 with no body.
+  `facingOkFor(width | null)` is the pure helper: null (no body) is
+  true, otherwise `width >= FACING.minShoulderWidthTorsoFrac` (0.6).
+- Threshold reasoning: front-facing reads ~0.7-1.0 (sim 0.73; typical
+  adult ~0.8); side profile collapses to ~0.3-0.4; 0.6 splits the gap.
+  Hint only — the gate is untouched and the machine keeps judging
+  swings while sideways.
+
+### Smoothing (`BODY.wrist*`, `SWING.wristVelEmaAlpha`)
+- Wrists split off the shared One Euro params: `wristOneEuroMinCutoff`
+  1.5 (was 1.0), `wristOneEuroBeta` 0.05 (was 0.02), `dCutoff` 1.0.
+  Why: the chop covers ~1.5 torso lengths in ~0.25 s; a 1.0 Hz filter
+  (τ ~0.16 s) lags most of the chop and attenuates the peak velocity
+  the machine judges on. 1.5 Hz cuts τ to ~0.11 s while still killing
+  frame-to-frame jitter (near Nyquist, ~16 Hz at 33 Hz inference).
+  Deliberately modest — no real-camera jitter data exists to justify
+  2-3 Hz. Torso / arm angles keep the Spider-Man values.
+- `wristVelEmaAlpha` stays 0.35: the EMA already averages ~3 frames
+  at 33 Hz, peak judging tolerates lag, and raising it without noise
+  data trades unmeasured noise for unmeasured speed.
+- Measured on the sim pipeline (MouseSource -> tracker -> machine),
+  new machine + new sim, only the wrist params varying:
+  release-to-hit 352 -> 256 ms (300 ms hold), 368 -> 256 ms (500 ms
+  hold); peak velocity 6.65 -> 9.59, 8.07 -> 10.84 torso/s. Full suite
+  green, so no Space Invaders / Dance Drop regression from the shared
+  BODY change.
+
+### Mouse sim clasp (`mouseSource.ts`)
+- Both arms straight up together (A+D or both buttons) latch a clasp:
+  both wrists follow one handle point on the midline, travelling from
+  overhead (raiseT 1) to waist height (raiseT 0). Two independent arcs
+  cannot keep wrists together — they bulge >1 torso length apart at
+  chest height mid-swing. Each arm follows its own raiseT on the handle
+  path, so releasing one hand early genuinely breaks the grip.
+- The latch releases 500 ms after both arms are fully down
+  (`CLASP_RELEASE_GRACE_MS`, local to the sim): the tracker lags the
+  raw motion, and the smoothed wrists cross the strike line ~100 ms
+  after the raw drop ends — releasing at the bottom would snap the raw
+  wrists to the sides and trip `hands-apart` before the hit lands.
+  500 ms still lands inside the 700 ms hit cooldown. Single-arm and
+  angled (Q/E) raises never clasp and still follow their own arcs.
+- Between chops the hands rest together at waist height. Known wart: a
+  single-arm raise started inside the release grace still follows the
+  handle (angle ~19° instead of 0°) until the arms rest again.
+
+### Still unverified (needs Brandon's phone)
+- Two-handed feel on a real body (thresholds are tuned on the sim +
+  the two playtest frames, not on a live chop) and phone inference Hz
+  through a full session. The strike line (0.85), hands-together
+  (0.5), facing (0.6) and wrist smoothing (1.5 / 0.05) are all first
+  guesses to confirm or retune after the retest.

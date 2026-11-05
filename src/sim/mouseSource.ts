@@ -14,11 +14,41 @@
  * - `Q` / `E`: raise the left / right arm angled outward (~35°), for
  *   testing angled shots. `A` / `D`: raise the left / right arm straight up.
  * - `Space` (hold): jump. `S` (hold): duck.
+ *
+ * Two-handed clasp (Swing Lab v2): when BOTH arms are raised straight up
+ * at the same time (A+D, or both mouse buttons), the hands grip one
+ * handle — both wrists follow a single point on the body's midline that
+ * travels from overhead down to waist height, instead of each arm
+ * sweeping its own arc from its own shoulder. Two independent arcs
+ * cannot keep the wrists together: the wrists bulge apart mid-swing
+ * (over a torso length at chest height), which no real clasped chop
+ * does. The clasp latches on when both straight-up raises are held and
+ * stays latched through the drop after release. It only releases 500 ms
+ * after both arms are fully down again: the body tracker smooths the
+ * wrists, so it still sees them mid-drop when the raw motion has
+ * already ended, and the hands must still read as together when the
+ * smoothed wrists cross the strike line — releasing the latch at the
+ * bottom would snap the raw wrists back to the sides and the smoothed
+ * gap would trip the machine's hands-apart check before the hit lands.
+ * A single arm, or an angled (Q/E) raise, still follows its own arc.
+ * Between chops the hands rest together at waist height rather than
+ * hanging at the sides — that is what keeping a grip on the pickaxe
+ * looks like. One wart: a single-arm raise started inside the release
+ * grace still follows the handle (its angle reads ~19° instead of 0°)
+ * until the arms rest again.
  */
 
 import { SIM } from '../core/config';
 import { PoseLandmark, type PoseFrameSource, type RawPoseFrame, type NormalizedLandmark } from '../tracking/poseTypes';
 import { clamp, lerp } from '../render/stage';
+
+/** Grace after both arms are fully down before the clasp releases, in ms.
+ * The tracker lags the raw motion, so the smoothed wrists cross the
+ * strike line ~100 ms after the raw drop ends; 500 ms clears that lag
+ * with margin and still lands inside the machine's 700 ms hit cooldown,
+ * so the release snap (wrists back to the sides) can never corrupt a
+ * judgment. */
+const CLASP_RELEASE_GRACE_MS = 500;
 
 interface ArmSim {
   /** 0 = down, 1 = fully raised. Animates toward `target`. */
@@ -47,6 +77,10 @@ export class MouseSource implements PoseFrameSource {
   /** Q / E held: angled arm raise (~35° outward). */
   private keyLeftAngled = false;
   private keyRightAngled = false;
+  /** Both arms raised straight up together: wrists share one handle. */
+  private clasped = false;
+  /** When the clasp may release after both arms are fully down (ms). */
+  private claspReleaseAtMs: number | null = null;
   private jumping = false;
   private ducking = false;
   private lastNowMs: number | null = null;
@@ -59,6 +93,8 @@ export class MouseSource implements PoseFrameSource {
   public stop(): void {
     this.running = false;
     this.lastNowMs = null;
+    this.clasped = false;
+    this.claspReleaseAtMs = null;
   }
 
   /**
@@ -136,6 +172,32 @@ export class MouseSource implements PoseFrameSource {
     this.advanceArm(this.leftArm, dtMs);
     this.advanceArm(this.rightArm, dtMs);
 
+    // Clasp latch: both arms straight up at once means one two-handed
+    // grip. Latches on when both straight-up raises are held; stays
+    // latched through the drop after release, and only releases
+    // CLASP_RELEASE_GRACE_MS after both arms are fully down, so the
+    // tracker (which lags the raw motion) still sees the wrists
+    // together when it crosses the strike line. Angled (Q/E) raises
+    // never clasp. Raising an arm again inside the grace cancels the
+    // release and the latch holds.
+    const leftStraight =
+      (this.pointerLeftDown || this.keyLeft) && !this.keyLeftAngled;
+    const rightStraight =
+      (this.pointerRightDown || this.keyRight) && !this.keyRightAngled;
+    if (leftStraight && rightStraight) {
+      this.clasped = true;
+      this.claspReleaseAtMs = null;
+    } else if (this.clasped) {
+      if (this.leftArm.raiseT > 0 || this.rightArm.raiseT > 0) {
+        this.claspReleaseAtMs = null;
+      } else if (this.claspReleaseAtMs === null) {
+        this.claspReleaseAtMs = nowMs + CLASP_RELEASE_GRACE_MS;
+      } else if (nowMs >= this.claspReleaseAtMs) {
+        this.clasped = false;
+        this.claspReleaseAtMs = null;
+      }
+    }
+
     const shoulderFor = (side: 'left' | 'right'): { x: number; y: number } =>
       side === 'left'
         ? { x: torsoX - halfShoulder, y: shoulderY }
@@ -147,6 +209,22 @@ export class MouseSource implements PoseFrameSource {
     } => {
       const shoulder = shoulderFor(side);
       const arm = side === 'left' ? this.leftArm : this.rightArm;
+      if (this.clasped) {
+        // One handle on the midline: the wrist travels the chop arc
+        // from overhead (raiseT 1) to waist height (raiseT 0), staying
+        // at the body's center the whole way. Each arm follows its own
+        // raiseT, so releasing one hand early lets that wrist drop while
+        // the other stays up — the grip genuinely breaks.
+        const wrist = lm(
+          torsoX,
+          shoulderY - (2 * arm.raiseT - 1) * SIM.armLength,
+        );
+        const elbow = lm(
+          shoulder.x + (wrist.x - shoulder.x) * 0.55,
+          shoulder.y + (wrist.y - shoulder.y) * 0.55,
+        );
+        return { elbow, wrist };
+      }
       const raised = arm.raiseT;
       // Down direction: arm hangs at the side. Up direction: `angleDeg`
       // from straight up. Interpolate by raiseT. Down is ~170° from up

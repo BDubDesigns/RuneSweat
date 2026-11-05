@@ -2,7 +2,7 @@
  * Lara's Pose Games — hub bootstrap.
  *
  * The hub owns: the camera, the pose source, the fixed-timestep loop, the
- * video/skeleton rendering, and the DOM. A game owns only its own simulation
+ * video/avatar rendering, and the DOM. A game owns only its own simulation
  * + canvas drawing + HUD string (see src/games/game.ts).
  *
  * Flow: pick a game -> turn the camera on (or play without a camera) ->
@@ -10,7 +10,7 @@
  * denied or unavailable, so the games are always playable.
  *
  * The camera video is NEVER shown during normal play (the player sees the
- * game + their skeleton only); the "Show camera" toggle is for calibration
+ * game + their avatar only); the "Show camera" toggle is for calibration
  * only. A game does not start — and pauses mid-game — while the
  * body-visible gate is closed (no usable full-body pose, or the pose model
  * failed to load). See `src/core/gate.ts`.
@@ -22,7 +22,7 @@
 import './styles.css';
 
 import replayFixture from '../fixtures/replay-sweep.json';
-import { GAMES, GATE, LOOP, SOURCE_SELECTION, STAGE } from './core/config';
+import { GAMES, GATE, LOOP, OUTFIT, SOURCE_SELECTION, STAGE } from './core/config';
 import { startCamera, stopCamera, CameraError } from './core/camera';
 import { SoundEffects } from './core/audio';
 import { BodyStateTracker, type BodyState } from './core/bodyState';
@@ -30,6 +30,7 @@ import { evaluateGate, type GateOptions, type GateState, type ModelState } from 
 import { createFixedStepLoop } from './core/loop';
 import { drawHud, type HudReadout } from './debug/hud';
 import { syncCanvasBackingStore, toNormalized, type Vec2 } from './render/stage';
+import { AvatarRenderer } from './render/avatar';
 import {
   drawBlockingOverlay,
   drawSkeleton,
@@ -97,6 +98,10 @@ function main(): void {
 
   const sfx = new SoundEffects();
   const tracker = new BodyStateTracker();
+  /** The player on screen: a chunky miner in the default outfit, drawn
+   * from the raw landmarks for every game. The stickman skeleton is a
+   * debug overlay only (see the render step). */
+  const avatar = new AvatarRenderer();
 
   const mouse = new MouseSource();
   const replay = new ReplaySource(parseReplayClip(replayFixture));
@@ -109,7 +114,7 @@ function main(): void {
   let showDebug: boolean = true;
   /**
    * Camera video is hidden by default: the player sees the game + their
-   * skeleton, never themselves. The "Show camera" toggle (button or V key)
+   * avatar, never themselves. The "Show camera" toggle (button or V key)
    * shows it letterboxed, for calibration only.
    */
   let showVideo: boolean = false;
@@ -275,7 +280,7 @@ function main(): void {
     mediaPipe.start(globalThis.performance.now());
     activeSource = mediaPipe;
     btnRetry.disabled = false;
-    setStatus('Camera on! Pick a game — stand back so your whole body fits. You won\'t see yourself — you\'ll see your skeleton.');
+    setStatus('Camera on! Pick a game — stand back so your whole body fits. You won\'t see yourself — you\'ll see your miner.');
     btnSim.disabled = true;
     if (pendingGameId !== null) {
       const gameId = pendingGameId;
@@ -526,7 +531,7 @@ function main(): void {
       // Fixed landscape stage, ALWAYS — never the video's intrinsic size.
       syncCanvasBackingStore(canvas, STAGE.width, STAGE.height);
 
-      // Video is hidden by default: stage background + skeleton only.
+      // Video is hidden by default: stage background + avatar only.
       // Shown letterboxed only while the calibration toggle is on.
       if (video !== null && showVideo) {
         drawVideoMirrored(context, video, canvas.width, canvas.height);
@@ -534,8 +539,21 @@ function main(): void {
         drawStageBackground(context, canvas.width, canvas.height);
       }
 
+      // The avatar is the player on screen for every game. The stickman
+      // skeleton is a debug overlay only: on top of the avatar, only
+      // while the debug HUD is on (D key), never the default view.
       if (latestLandmarks !== null) {
-        drawSkeleton(context, latestLandmarks, canvas.width, canvas.height);
+        avatar.draw(
+          context,
+          latestLandmarks,
+          canvas.width,
+          canvas.height,
+          OUTFIT,
+          nowMs,
+        );
+        if (showDebug) {
+          drawSkeleton(context, latestLandmarks, canvas.width, canvas.height);
+        }
       }
 
       if (activeGame !== null) {

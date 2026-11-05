@@ -15,12 +15,9 @@
 
 import { RENDER, STAGE, SWING } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
-import {
-  armDirectionCanvas,
-  type BodyState,
-} from '../../core/bodyState';
+import type { BodyState } from '../../core/bodyState';
 import { clamp, toCanvas } from '../../render/stage';
-import { PoseLandmark, type NormalizedLandmark } from '../../tracking/poseTypes';
+import type { NormalizedLandmark } from '../../tracking/poseTypes';
 import type { Game } from '../game';
 import {
   SwingMachine,
@@ -43,6 +40,59 @@ export function xpIntoLevel(xp: number): number {
 /** Crack lines drawn on the node for `hits` hits on it (max 3). */
 export function cracksForHits(hits: number): number {
   return Math.min(3, Math.max(0, hits));
+}
+
+/**
+ * Front-center node position, derived from the body's canvas hip
+ * position (Nov 4, 2026 playtest redesign): the node sits directly in
+ * front of the avatar at chair/waist height, so the rock you chop
+ * occludes the avatar's waist and below. `x` is the hip-centre canvas
+ * x; `y` puts the top of the rock around waist height (the centre sits
+ * half a radius below the hips). No body: centred on the stage, waiting
+ * for a miner.
+ */
+export function nodeCenterForBody(
+  body: BodyState | null,
+  width: number,
+  height: number,
+): { x: number; y: number } {
+  const r = Math.min(width, height) * 0.15;
+  if (body === null || !body.present) {
+    return { x: width / 2, y: height * 0.62 };
+  }
+  const hip = toCanvas(
+    { x: body.torsoX, y: body.torsoY, visibility: 1 },
+    width,
+    height,
+  );
+  return { x: hip.x, y: hip.y + r * 0.5 };
+}
+
+/**
+ * Pickaxe anchor + handle direction for a body, canvas space. The
+ * pickaxe is gripped in the RIGHT hand at all times: the anchor is the
+ * right wrist (mirrored through `toCanvas`), and the handle runs along
+ * the right forearm (shoulder->wrist direction, from the right arm's
+ * angle — unclamped, so an arm hanging down points the head down and an
+ * arm raised overhead points it up).
+ */
+export function pickaxeAnchorForBody(
+  body: BodyState,
+  width: number,
+  height: number,
+): { x: number; y: number; dirX: number; dirY: number } {
+  const anchor = toCanvas(
+    { x: body.rightWristX, y: body.rightWristY, visibility: 1 },
+    width,
+    height,
+  );
+  const rad = (body.rightArm.angleDeg * Math.PI) / 180;
+  return {
+    x: anchor.x,
+    y: anchor.y,
+    dirX: -Math.sin(rad),
+    dirY: -Math.cos(rad),
+  };
 }
 
 interface Particle {
@@ -78,7 +128,7 @@ export interface SwingLabSnapshot {
 }
 
 const PHASE_LINES: Record<SwingPhase, string> = {
-  ready: 'Raise your arms overhead!',
+  ready: 'Both hands up together, then chop down in front of you!',
   windup: 'Now SWING DOWN! ⬇️',
   strike: 'STRIKE! ⛏️',
   recover: '⛏️ HIT!',
@@ -113,6 +163,8 @@ export class SwingLabGame implements Game {
   private levelBannerUntilMs = 0;
   private lastWidth: number = STAGE.width;
   private lastHeight: number = STAGE.height;
+  /** Latest body, for the front-center node position (see nodeCenter). */
+  private lastBody: BodyState | null = null;
   private particles: Particle[] = [];
   private floaters: Floater[] = [];
 
@@ -150,6 +202,7 @@ export class SwingLabGame implements Game {
   ): void {
     if (this.paused) return;
     const dtSec = dtMs / 1000;
+    this.lastBody = body;
 
     const event = this.machine.update(body, nowMs);
     const phase = this.machine.currentPhase;
@@ -168,26 +221,28 @@ export class SwingLabGame implements Game {
     ctx: CanvasRenderingContext2D,
     nowMs: number,
     body: BodyState | null,
-    landmarks: readonly NormalizedLandmark[] | null,
+    _landmarks: readonly NormalizedLandmark[] | null,
   ): void {
     const width = ctx.canvas.width;
     const height = ctx.canvas.height;
     this.lastWidth = width;
     this.lastHeight = height;
+    this.lastBody = body;
     const snap = this.lastSnapshot ?? this.machine.snapshot();
 
     ctx.save();
     if (nowMs < this.shakeUntilMs) {
-      const m = SWING.shakePx;
+      // SWING.shakePx is the tuned base; doubled at render so a hit
+      // reads on a phone screen instead of shivering by a pixel or two.
+      const m = SWING.shakePx * 2;
       ctx.translate((Math.random() * 2 - 1) * m, (Math.random() * 2 - 1) * m);
     }
 
     this.drawNode(ctx);
     this.drawParticles(ctx);
-    this.drawPickaxe(ctx, body, snap, width, height);
-    this.drawHelmet(ctx, landmarks, width, height);
+    this.drawPickaxe(ctx, body, width, height);
     this.drawSwingMeter(ctx, snap, nowMs);
-    this.drawPhaseText(ctx, snap, width);
+    this.drawPhaseText(ctx, snap, width, body);
     if (snap.phase === 'ready' && this.swings === 0) {
       this.drawGhostArc(ctx, width, height);
     }
@@ -237,6 +292,7 @@ export class SwingLabGame implements Game {
     this.lastHandedness = null;
     this.lastSnapshot = null;
     this.prevPhase = 'ready';
+    this.lastBody = null;
     this.shakeUntilMs = 0;
     this.flashUntilMs = 0;
     this.breakBannerUntilMs = 0;
@@ -280,7 +336,7 @@ export class SwingLabGame implements Game {
   }
 
   private nodeCenter(): { x: number; y: number } {
-    return { x: this.lastWidth * 0.72, y: this.lastHeight * 0.62 };
+    return nodeCenterForBody(this.lastBody, this.lastWidth, this.lastHeight);
   }
 
   private nodeRadius(): number {
@@ -372,8 +428,9 @@ export class SwingLabGame implements Game {
       });
       ctx.stroke();
     }
-    // Node HP pips under the rock.
-    ctx.font = `20px ${RENDER.gameFont}`;
+    // Node HP pips under the rock: 🪨 = hits landed (cracks), ⬜ = hits
+    // still to go. The count of white squares is the hits remaining.
+    ctx.font = `22px ${RENDER.gameFont}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#e8e8f0';
@@ -394,15 +451,16 @@ export class SwingLabGame implements Game {
   }
 
   /**
-   * The pickaxe, anchored at the wrists. Both arms raised: midpoint of
-   * the two wrists, angled by the average arm angle. One arm raised:
-   * that wrist. No arm raised: leaning on the rock. Canvas space —
-   * wrist X is mirrored through `toCanvas` like the skeleton.
+   * The pickaxe, gripped in the RIGHT hand at all times. The anchor is
+   * the right wrist and the handle runs along the right forearm — never
+   * the midpoint of both wrists, never teleported. Arms down: the miner
+   * holds it at rest by their side, head down. No body: leaning on the
+   * rock, waiting for a miner. Canvas space — the wrist is mirrored
+   * through `toCanvas` like the avatar.
    */
   private drawPickaxe(
     ctx: CanvasRenderingContext2D,
     body: BodyState | null,
-    snap: SwingSnapshot,
     width: number,
     height: number,
   ): void {
@@ -413,40 +471,8 @@ export class SwingLabGame implements Game {
       this.drawPickaxeShape(ctx, rockX - r - 8, rockY + r * 0.4, -0.5, -0.85);
       return;
     }
-    const raised: { x: number; y: number; angleDeg: number }[] = [];
-    if (snap.leftHeight > 0) {
-      raised.push({
-        x: body.leftWristX,
-        y: body.leftWristY,
-        angleDeg: body.leftArm.angleDeg,
-      });
-    }
-    if (snap.rightHeight > 0) {
-      raised.push({
-        x: body.rightWristX,
-        y: body.rightWristY,
-        angleDeg: body.rightArm.angleDeg,
-      });
-    }
-    if (raised.length === 0) {
-      // Arms down: the miner holds the pickaxe at rest, head down by
-      // the rock — draw it leaning, as when there is no body.
-      this.drawPickaxeShape(ctx, rockX - r - 8, rockY + r * 0.4, -0.5, -0.85);
-      return;
-    }
-    const midX =
-      raised.reduce((sum, w) => sum + w.x, 0) / raised.length;
-    const midY =
-      raised.reduce((sum, w) => sum + w.y, 0) / raised.length;
-    const angleDeg =
-      raised.reduce((sum, w) => sum + w.angleDeg, 0) / raised.length;
-    const anchor = toCanvas(
-      { x: midX, y: midY, visibility: 1 },
-      width,
-      height,
-    );
-    const dir = armDirectionCanvas(angleDeg);
-    this.drawPickaxeShape(ctx, anchor.x, anchor.y, dir.x, dir.y);
+    const { x, y, dirX, dirY } = pickaxeAnchorForBody(body, width, height);
+    this.drawPickaxeShape(ctx, x, y, dirX, dirY);
   }
 
   /** Handle + curved head along unit direction (`dirX`, `dirY`). */
@@ -485,55 +511,27 @@ export class SwingLabGame implements Game {
     ctx.restore();
   }
 
-  /** A little yellow hard hat on the miner's head — the skeleton is the miner. */
-  private drawHelmet(
-    ctx: CanvasRenderingContext2D,
-    landmarks: readonly NormalizedLandmark[] | null,
-    width: number,
-    height: number,
-  ): void {
-    if (landmarks === null) return;
-    const nose = landmarks[PoseLandmark.NOSE];
-    if (nose === undefined) return;
-    const p = toCanvas(nose, width, height);
-    ctx.save();
-    ctx.fillStyle = '#ffd166';
-    ctx.strokeStyle = '#d9a441';
-    ctx.lineWidth = 2;
-    // Dome.
-    ctx.beginPath();
-    ctx.arc(p.x, p.y - 6, 15, Math.PI, 0);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    // Brim.
-    ctx.beginPath();
-    ctx.ellipse(p.x, p.y - 6, 21, 4, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-
   /** Vertical windup meter on the left: fills as the wrists rise. */
   private drawSwingMeter(
     ctx: CanvasRenderingContext2D,
     snap: SwingSnapshot,
     nowMs: number,
   ): void {
-    const x = 46;
-    const top = 120;
-    const h = 300;
-    const w = 26;
+    const x = 54;
+    const top = 110;
+    const h = 340;
+    const w = 40;
     const progress = clamp(snap.windupProgress, 0, 1);
     const flashing =
       snap.phase === 'strike' || nowMs < this.flashUntilMs;
     ctx.save();
-    ctx.font = `700 18px ${RENDER.gameFont}`;
+    ctx.font = `700 24px ${RENDER.gameFont}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#e8e8f0';
-    ctx.fillText('SWING', x + w / 2, top - 22);
-    ctx.font = `16px ${RENDER.gameFont}`;
-    ctx.fillText('⬆ UP', x + w / 2, top - 44);
+    ctx.fillText('SWING', x + w / 2, top - 28);
+    ctx.font = `20px ${RENDER.gameFont}`;
+    ctx.fillText('⬆ UP', x + w / 2, top - 56);
     // Track.
     ctx.fillStyle = 'rgba(11, 11, 18, 0.72)';
     ctx.fillRect(x, top, w, h);
@@ -554,22 +552,36 @@ export class SwingLabGame implements Game {
       ctx.lineWidth = 2;
       ctx.strokeRect(x, top, w, h);
     }
-    ctx.font = `16px ${RENDER.gameFont}`;
+    ctx.font = `20px ${RENDER.gameFont}`;
     ctx.fillStyle = '#e8e8f0';
-    ctx.fillText('⬇ DOWN', x + w / 2, top + h + 22);
+    ctx.fillText('⬇ DOWN', x + w / 2, top + h + 28);
     ctx.restore();
+  }
+
+  /**
+   * Read `facingOk` off the snapshot when the field exists. The swing
+   * machine rework (Worker B) adds `facingOk: boolean` to
+   * `SwingSnapshot`; until that lands the field is absent and this
+   * returns `undefined` — no hint, no crash, and no type error either
+   * way. The hint is advisory only, never a block.
+   */
+  private snapshotFacingOk(snap: SwingSnapshot): boolean | undefined {
+    if (!('facingOk' in snap)) return undefined;
+    const value = snap.facingOk;
+    return typeof value === 'boolean' ? value : undefined;
   }
 
   private drawPhaseText(
     ctx: CanvasRenderingContext2D,
     snap: SwingSnapshot,
     width: number,
+    body: BodyState | null,
   ): void {
     const line = PHASE_LINES[snap.phase];
     const last = snap.lastEvent;
     const sub =
       last === null
-        ? 'Tip: raise BOTH arms up, then chop down fast!'
+        ? 'Tip: hands together overhead, then chop straight down in front of you!'
         : last.kind === 'hit'
           ? `Last swing: HIT! ${HANDEDNESS_LABELS[last.handedness]}`
           : `Last swing: ${last.message}`;
@@ -586,10 +598,36 @@ export class SwingLabGame implements Game {
     ctx.strokeText(sub, width / 2, 100);
     ctx.fillStyle = '#e8e8f0';
     ctx.fillText(sub, width / 2, 100);
+    // Facing hint: the machine can see the body is sideways (shoulders
+    // edge-on). A hint only — the swing still counts if it lands.
+    if (
+      body !== null &&
+      body.present &&
+      this.snapshotFacingOk(snap) === false
+    ) {
+      ctx.font = `700 26px ${RENDER.gameFont}`;
+      ctx.strokeText(
+        "Face the camera — I can't see you from the side",
+        width / 2,
+        142,
+      );
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText(
+        "Face the camera — I can't see you from the side",
+        width / 2,
+        142,
+      );
+    }
     ctx.restore();
   }
 
-  /** Ghost of the ideal swing arc, until the first hit lands. */
+  /**
+   * Ghost of the ideal swing, until the first hit lands: both hands
+   * together rise up the left (dashed), swing over the top to the
+   * centre front, then chop straight down in front (solid arrow) — the
+   * two-hand clasp from the Nov 4 reference frames, not the old
+   * two-arrow arc.
+   */
   private drawGhostArc(
     ctx: CanvasRenderingContext2D,
     width: number,
@@ -598,54 +636,69 @@ export class SwingLabGame implements Game {
     const cx = width * 0.5;
     const topY = height * 0.28;
     const botY = height * 0.62;
+    const riseX = cx - 90;
     ctx.save();
     ctx.globalAlpha = 0.75;
     ctx.strokeStyle = '#ffffff';
     ctx.fillStyle = '#ffffff';
     ctx.lineWidth = 4;
     ctx.lineCap = 'round';
-    // Up arrow (left) + down arrow (right) + dashed connector on top.
-    ctx.beginPath();
-    ctx.moveTo(cx - 60, botY);
-    ctx.lineTo(cx - 60, topY + 14);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(cx - 72, topY + 26);
-    ctx.lineTo(cx - 60, topY);
-    ctx.lineTo(cx - 48, topY + 26);
-    ctx.closePath();
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(cx + 60, topY + 14);
-    ctx.lineTo(cx + 60, botY);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(cx + 48, botY - 26);
-    ctx.lineTo(cx + 60, botY);
-    ctx.lineTo(cx + 72, botY - 26);
-    ctx.closePath();
-    ctx.fill();
+    // Rise: dashed line up the left, arrowhead at the top.
     ctx.setLineDash([8, 6]);
     ctx.beginPath();
-    ctx.moveTo(cx - 60, topY + 14);
-    ctx.quadraticCurveTo(cx, topY - 34, cx + 60, topY + 14);
+    ctx.moveTo(riseX, botY);
+    ctx.lineTo(riseX, topY + 14);
     ctx.stroke();
     ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(riseX - 12, topY + 26);
+    ctx.lineTo(riseX, topY);
+    ctx.lineTo(riseX + 12, topY + 26);
+    ctx.closePath();
+    ctx.fill();
+    // Hands together over the top: dashed arc from the rise to centre.
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.moveTo(riseX, topY + 14);
+    ctx.quadraticCurveTo(cx - 45, topY - 30, cx, topY - 6);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Two clasped hands at the top, centre front.
+    for (const dx of [-13, 13]) {
+      ctx.beginPath();
+      ctx.arc(cx + dx, topY - 6, 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Chop: solid thick arrow straight down the centre, in front.
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(cx, topY + 16);
+    ctx.lineTo(cx, botY - 14);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 14, botY - 28);
+    ctx.lineTo(cx, botY);
+    ctx.lineTo(cx + 14, botY - 28);
+    ctx.closePath();
+    ctx.fill();
     ctx.font = `700 22px ${RENDER.gameFont}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('UP, then CHOP DOWN!', cx, topY - 48);
+    ctx.fillText('UP TOGETHER, THEN CHOP DOWN IN FRONT!', cx, topY - 52);
     ctx.restore();
   }
 
   private drawFloaters(ctx: CanvasRenderingContext2D, nowMs: number): void {
     ctx.save();
-    ctx.font = `700 26px ${RENDER.gameFont}`;
+    ctx.font = `700 36px ${RENDER.gameFont}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     for (const f of this.floaters) {
       const age = 1 - (f.untilMs - nowMs) / SWING.floaterMs;
       ctx.globalAlpha = clamp(1 - age, 0, 1);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.lineWidth = 6;
+      ctx.strokeText(f.text, f.x, f.y - age * 30);
       ctx.fillStyle = '#ffd166';
       ctx.fillText(f.text, f.x, f.y - age * 30);
     }

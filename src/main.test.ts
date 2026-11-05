@@ -44,12 +44,20 @@ class StubElement {
   }
 
   public getContext(): unknown {
-    return new Proxy(
-      {},
-      {
-        get: () => () => undefined,
+    // The render path reads ctx.canvas (games + hub size from it) and
+    // ctx.measureText (debug HUD layout) — a bare no-op proxy would
+    // hand back undefined for both and throw. The proxy's target IS
+    // this element, so `canvas` comes back as the element itself
+    // (with a working addEventListener for the games' tap listeners).
+    // Everything else is a no-op: drawing is unobservable in node,
+    // only the wiring is.
+    return new Proxy(this, {
+      get: (target, prop) => {
+        if (prop === 'canvas') return target;
+        if (prop === 'measureText') return () => ({ width: 0 });
+        return () => undefined;
       },
-    );
+    });
   }
 
   public getBoundingClientRect(): {
@@ -70,6 +78,8 @@ class StubHTMLButtonElement extends StubHTMLElement {}
 
 describe('fullscreen toggle wiring', () => {
   const elements = new Map<string, StubElement>();
+  /** Every element main() creates (game cards included), in order. */
+  const createdElements: StubElement[] = [];
   const docHandlers = new Map<string, ((event: never) => void)[]>();
   const doc = {
     fullscreenElement: null as unknown,
@@ -90,7 +100,11 @@ describe('fullscreen toggle wiring', () => {
       }
       return elements.get(id) as StubElement;
     },
-    createElement: (_tag: string): StubElement => new StubHTMLButtonElement(),
+    createElement: (_tag: string): StubElement => {
+      const el = new StubHTMLButtonElement();
+      createdElements.push(el);
+      return el;
+    },
     addEventListener: (type: string, fn: (event: never) => void): void => {
       const list = docHandlers.get(type) ?? [];
       list.push(fn);
@@ -171,4 +185,94 @@ describe('fullscreen toggle wiring', () => {
     await flush();
     expect(stage.requestFullscreenCalls).toBe(before + 1);
   });
+
+  describe('town hub <-> refiner swap wiring', () => {
+  /**
+   * End-to-end wiring of the v3.1 integration in `main.ts`, against
+   * the same stub DOM: sim source -> Swing Lab -> Space (manual
+   * pause, hub opens) -> tap Refiner -> refiner runs -> tap Leave to
+   * town -> Swing Lab back, hub open. The loop's rAF is stubbed and
+   * driven by hand; the canvas ctx is the no-op proxy above (drawing
+   * is unobservable, only the wiring is).
+   */
+  const rafQueue: ((timeMs: number) => void)[] = [];
+  let nowMs = 0;
+
+  function driveFrames(n: number): void {
+    for (let i = 0; i < n; i++) {
+      nowMs += 1000 / 60;
+      const cbs = rafQueue.splice(0, rafQueue.length);
+      for (const cb of cbs) cb(nowMs);
+    }
+  }
+
+  function dispatchCanvasPointerDown(x: number, y: number): void {
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    const event = { clientX: x, clientY: y, button: 0, buttons: 0 };
+    for (const fn of stage.handlersFor('pointerdown')) {
+      fn(event as never);
+    }
+  }
+
+  function hudText(): string {
+    return elements.get('game-hud')?.innerHTML ?? '';
+  }
+
+  function pauseLabel(): string {
+    return elements.get('btn-pause')?.textContent ?? '';
+  }
+
+  it('swaps Swing Lab -> hub -> refiner -> hub -> Swing Lab', () => {
+    (globalThis as unknown as Record<string, unknown>).requestAnimationFrame = (
+      cb: (timeMs: number) => void,
+    ): number => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    };
+    (globalThis as unknown as Record<string, unknown>).cancelAnimationFrame =
+      (): void => {};
+
+    // Play without a camera, then pick Swing Lab (3rd game card:
+    // Space Invaders, Dance Drop, Swing Lab).
+    const btnSim = elements.get('btn-sim');
+    if (btnSim === undefined) throw new Error('btn-sim missing');
+    btnSim.click();
+    const cards = createdElements.filter((el) =>
+      el.className.startsWith('game-card'),
+    );
+    expect(cards).toHaveLength(5);
+    cards[2]?.click();
+
+    // ~1.5 s of frames: the gate opens on the sim body and the game
+    // starts; the HUD shows Swing Lab.
+    driveFrames(90);
+    expect(hudText()).toContain('Mining Lv');
+
+    // Space: manual pause, hub opens.
+    dispatchDocumentEvent('keydown', {
+      key: ' ',
+      repeat: false,
+      preventDefault: () => {},
+    });
+    expect(pauseLabel()).toBe('▶ Play');
+    // A frame renders the hub, computing its button rects. The
+    // Refiner button is right-column, first activity: x 492..936,
+    // y 156..208.
+    driveFrames(2);
+    dispatchCanvasPointerDown(714, 182);
+
+    // The refiner starts on the next update; the HUD shows it.
+    driveFrames(3);
+    expect(hudText()).toContain('Refining Lv');
+    expect(pauseLabel()).toBe('⏸ Pause');
+
+    // "Leave to town" chip: bottom-left, x 12..232, y 488..528.
+    dispatchCanvasPointerDown(122, 508);
+    driveFrames(2);
+    // Swing Lab is restored and the hub is open again (manual pause).
+    expect(hudText()).toContain('Mining Lv');
+    expect(pauseLabel()).toBe('▶ Play');
+  });
+});
 });

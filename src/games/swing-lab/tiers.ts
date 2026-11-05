@@ -16,10 +16,17 @@
  * the XP all read this table.
  */
 
+import type { SaveItemId } from '../../core/save';
+
 /** One mineable RuneSpace ore node. */
 export interface MiningTier {
-  /** Stable id: `'ferrite-shale'`, `'galvanite'`, ... */
-  id: string;
+  /**
+   * Stable id: `'ferrite-shale'`, `'galvanite'`, ... — a `SaveItemId`,
+   * not a bare string, so a tier's ore can go straight into the
+   * inventory store (v3.1) with no cast. A new tier must first be a
+   * known save item id.
+   */
+  id: SaveItemId;
   /** RuneSpace item name: `'Ferrite Shale'`. */
   name: string;
   /** Where it is mined in RuneSpace: `'The Jag'`. */

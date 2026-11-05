@@ -722,6 +722,9 @@ export class RefinerGame implements Game {
   }
 
   private readonly handlePointerDown = (event: PointerEvent): void => {
+    // Paused (hub open over the refiner): taps belong to the overlay,
+    // not to the recipe chips / leave chip underneath it.
+    if (this.paused) return;
     const canvas = this.lastCanvas;
     if (canvas === null) return;
     const rect =

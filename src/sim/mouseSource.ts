@@ -16,6 +16,10 @@
  * - `W` (hold): jump. `S` (hold): duck. (v3.1: Space used to be jump;
  *   Space is now the pause toggle in main.ts, so jump moved to W. The
  *   real-camera body jump is unaffected — it comes from landmarks.)
+ * - `X` (hold): legs wide — ankles jump out to the star-jump spread,
+ *   for testing star jumps in the refiner (v3.1 integration). A plain
+ *   jump keeps the ankles at hip width and does NOT count as a star
+ *   jump, by design.
  *
  * Two-handed clasp (Swing Lab v2): when BOTH arms are raised straight up
  * at the same time (A+D, or both mouse buttons), the hands grip one
@@ -85,6 +89,8 @@ export class MouseSource implements PoseFrameSource {
   private claspReleaseAtMs: number | null = null;
   private jumping = false;
   private ducking = false;
+  /** X held: legs wide (ankles out to the star-jump spread). */
+  private legsWide = false;
   private lastNowMs: number | null = null;
 
   public start(nowMs: number): void {
@@ -137,6 +143,11 @@ export class MouseSource implements PoseFrameSource {
 
   public setDucking(ducking: boolean): void {
     this.ducking = ducking;
+  }
+
+  /** X (hold): spread the ankles to the star-jump width. */
+  public setLegsWide(wide: boolean): void {
+    this.legsWide = wide;
   }
 
   private advanceArm(arm: ArmSim, dtMs: number): void {
@@ -256,6 +267,13 @@ export class MouseSource implements PoseFrameSource {
     const legBend = this.ducking ? 0.25 : 0;
     const kneeY = hipY + SIM.legLength * 0.5;
     const ankleY = hipY + SIM.legLength;
+    // Legs-wide (X hold, v3.1): ankles jump out to the star-jump spread
+    // while the knees stay at hip width — the star-jump detector reads
+    // ankles only, so the knees need not move. Standing ankles read
+    // ~0.59 torso; legs-wide reads SIM.legsWideAnkleSpreadTorsoFrac.
+    const ankleHalf = this.legsWide
+      ? (SIM.legsWideAnkleSpreadTorsoFrac * SIM.torsoLength) / 2
+      : hipHalf;
 
     const landmarks: NormalizedLandmark[] = new Array<NormalizedLandmark>(33);
     const nose = lm(torsoX, shoulderY - 0.09);
@@ -286,12 +304,12 @@ export class MouseSource implements PoseFrameSource {
     landmarks[PoseLandmark.RIGHT_HIP] = lm(torsoX + hipHalf, hipY);
     landmarks[PoseLandmark.LEFT_KNEE] = lm(torsoX - hipHalf - legBend * 0.1, kneeY);
     landmarks[PoseLandmark.RIGHT_KNEE] = lm(torsoX + hipHalf + legBend * 0.1, kneeY);
-    landmarks[PoseLandmark.LEFT_ANKLE] = lm(torsoX - hipHalf, ankleY);
-    landmarks[PoseLandmark.RIGHT_ANKLE] = lm(torsoX + hipHalf, ankleY);
-    landmarks[PoseLandmark.LEFT_HEEL] = lm(torsoX - hipHalf - 0.01, ankleY);
-    landmarks[PoseLandmark.RIGHT_HEEL] = lm(torsoX + hipHalf + 0.01, ankleY);
-    landmarks[PoseLandmark.LEFT_FOOT_INDEX] = lm(torsoX - hipHalf + 0.02, ankleY + 0.01);
-    landmarks[PoseLandmark.RIGHT_FOOT_INDEX] = lm(torsoX + hipHalf - 0.02, ankleY + 0.01);
+    landmarks[PoseLandmark.LEFT_ANKLE] = lm(torsoX - ankleHalf, ankleY);
+    landmarks[PoseLandmark.RIGHT_ANKLE] = lm(torsoX + ankleHalf, ankleY);
+    landmarks[PoseLandmark.LEFT_HEEL] = lm(torsoX - ankleHalf - 0.01, ankleY);
+    landmarks[PoseLandmark.RIGHT_HEEL] = lm(torsoX + ankleHalf + 0.01, ankleY);
+    landmarks[PoseLandmark.LEFT_FOOT_INDEX] = lm(torsoX - ankleHalf + 0.02, ankleY + 0.01);
+    landmarks[PoseLandmark.RIGHT_FOOT_INDEX] = lm(torsoX + ankleHalf - 0.02, ankleY + 0.01);
 
     return {
       timestampMs: nowMs,

@@ -251,7 +251,28 @@ describe('RefinerGame via mouse sim', () => {
     expect(ctx.game.snapshot().phase).toBe('jumping');
   });
 
-  it('sim star jumps do NOT count yet — the sim cannot spread its ankles (known gap)', () => {
+  it('sim star jumps count with the X legs-wide input (v3.1 integration)', () => {
+    const ctx = setup();
+    let t = grabInSim(ctx, 0);
+    t = dropInSim(ctx, t);
+    t = grabInSim(ctx, t);
+    t = dropInSim(ctx, t);
+    expect(ctx.game.snapshot().phase).toBe('jumping');
+    // W (jump) + Q+E (arms wide) + X (legs wide): all three detector
+    // conditions hold, so the star jumps count in the sim now.
+    ctx.mouse.setJumping(true);
+    ctx.mouse.setKeyArmAngled('left', true);
+    ctx.mouse.setKeyArmAngled('right', true);
+    ctx.mouse.setLegsWide(true);
+    step(ctx, t, t + 1000);
+    ctx.mouse.setJumping(false);
+    ctx.mouse.setKeyArmAngled('left', false);
+    ctx.mouse.setKeyArmAngled('right', false);
+    ctx.mouse.setLegsWide(false);
+    expect(ctx.game.snapshot().jumpsDone).toBeGreaterThanOrEqual(1);
+  });
+
+  it('sim star jumps do NOT count without the legs-wide input', () => {
     const ctx = setup();
     let t = grabInSim(ctx, 0);
     t = dropInSim(ctx, t);
@@ -260,8 +281,7 @@ describe('RefinerGame via mouse sim', () => {
     expect(ctx.game.snapshot().phase).toBe('jumping');
     // W (jump) + Q+E (arms wide): the jump + arms conditions hold,
     // but the sim's ankles stay at hip width (~0.59 torso), below
-    // the detector's 0.85 legs-apart line. Remove / adjust this test
-    // when the coordinator adds a sim leg-spread input.
+    // the detector's 0.85 legs-apart line. Hold X to spread them.
     ctx.mouse.setJumping(true);
     ctx.mouse.setKeyArmAngled('left', true);
     ctx.mouse.setKeyArmAngled('right', true);

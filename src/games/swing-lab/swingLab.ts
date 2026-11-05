@@ -25,6 +25,7 @@ import { RENDER, STAGE, SWING } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
 import { assetUrl } from '../../core/assetUrl';
 import type { BodyState } from '../../core/bodyState';
+import { inventory } from '../../core/inventory';
 import { clamp, toCanvas } from '../../render/stage';
 import type { NormalizedLandmark } from '../../tracking/poseTypes';
 import type { Game } from '../game';
@@ -425,6 +426,9 @@ export class SwingLabGame implements Game {
     if (tier.id === this.activeTier.id) return true;
     this.activeTier = tier;
     this.nodeHits = 0;
+    // The ore counter follows the mine: it shows what you own of the
+    // newly selected tier (the store holds every tier separately).
+    this.ore = inventory.count(tier.id);
     return true;
   }
 
@@ -579,6 +583,9 @@ export class SwingLabGame implements Game {
 
   /** Canvas `pointerdown` -> canvas-space coords -> `pointerDownAt`. */
   private readonly handlePointerDown = (event: PointerEvent): void => {
+    // Paused (hub open, or auto-paused): taps belong to the overlay, not
+    // to the mine-selector chips underneath it.
+    if (this.paused) return;
     const canvas = this.lastCanvas;
     if (canvas === null) return;
     const rect =
@@ -605,6 +612,7 @@ export class SwingLabGame implements Game {
     return (
       `<span>⛏️ Mining Lv ${level} — ${xpIntoLevel(this.xp)}/${SWING.xpPerLevel} XP</span> &nbsp; ` +
       `<span>${oreImg} Ore ${this.ore} · ${tier.name}</span> &nbsp; ` +
+      `<span>💰 ${inventory.credits} cr</span> &nbsp; ` +
       `<span>Swings ${this.swings}</span> &nbsp; ` +
       `<span>Node ${this.nodeHits}/${SWING.hitsPerNode}</span> &nbsp; ` +
       `<span>Phase: ${snap.phase} · L ${snap.leftVel.toFixed(1)} R ${snap.rightVel.toFixed(1)} torso/s</span>`
@@ -663,6 +671,12 @@ export class SwingLabGame implements Game {
     // A fresh game starts at Mining 1, so it starts on the level 1 mine:
     // Galvanite would be locked at this level anyway.
     this.activeTier = requireTier(DEFAULT_TIER_ID);
+    // The inventory store is the source of truth across sessions (v3.1):
+    // ore/XP earned in earlier sessions are still owned, so the display
+    // starts from the store instead of zero. reset() is also called by
+    // restart(), so a restart keeps what you own.
+    this.ore = inventory.count(this.activeTier.id);
+    this.xp = inventory.xp('mining');
   }
 
   private applyEvent(event: SwingEvent, nowMs: number): void {
@@ -674,10 +688,15 @@ export class SwingLabGame implements Game {
       return;
     }
     // Counted hit: ore + tier XP + a crack on the node + an ore drop.
+    // The inventory store is the source of truth (v3.1): the hit lands
+    // in the store immediately, so the refiner and the hub see it and a
+    // refresh never loses it. The session counters mirror the store.
     this.swings += 1;
     this.ore += this.activeTier.orePerHit;
+    inventory.add(this.activeTier.id, this.activeTier.orePerHit);
     const prevLevel = miningLevel(this.xp);
     this.xp += this.activeTier.xpPerHit;
+    inventory.addXp('mining', this.activeTier.xpPerHit);
     this.nodeHits += 1;
     this.lastHandedness = event.handedness;
     this.sfx.crack();

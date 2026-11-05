@@ -101,4 +101,27 @@ describe('MouseSource', () => {
     expect(body.leftArm.raised).toBe(true);
     expect(body.leftArm.angleDeg).toBeCloseTo(0, 0);
   });
+
+  it('keeps ankles at hip width standing (~0.59 torso)', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    const body = advanceTo(source, tracker, 200);
+    expect(body.ankleSpreadTorsoFrac).toBeCloseTo(0.59, 1);
+  });
+
+  it('spreads ankles past the star-jump line while X is held', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    source.setLegsWide(true);
+    const body = advanceTo(source, tracker, 200);
+    // Detector needs >= 0.85 (STAR_JUMP.minAnkleSpreadTorsoFrac);
+    // legs-wide reads SIM.legsWideAnkleSpreadTorsoFrac (1.15).
+    expect(body.ankleSpreadTorsoFrac ?? 0).toBeGreaterThanOrEqual(0.85);
+    expect(body.ankleSpreadTorsoFrac).toBeCloseTo(1.15, 1);
+    source.setLegsWide(false);
+    const body2 = advanceTo(source, tracker, 400, 216);
+    expect(body2.ankleSpreadTorsoFrac).toBeCloseTo(0.59, 1);
+  });
 });

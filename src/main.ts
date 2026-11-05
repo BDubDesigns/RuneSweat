@@ -48,11 +48,16 @@ import type { Game, GameConstructor } from './games/game';
 import { SpaceInvadersGame } from './games/space-invaders/spaceInvaders';
 import { DanceDropGame } from './games/dance-drop/danceDrop';
 import { SwingLabGame } from './games/swing-lab/swingLab';
+import { RefinerGame } from './games/refiner/refiner';
+import { TownHub } from './hub/townHub';
 
 const GAME_CONSTRUCTORS: Record<string, GameConstructor> = {
   'space-invaders': SpaceInvadersGame,
   'dance-drop': DanceDropGame,
   'swing-lab': SwingLabGame,
+  // The refiner has NO hub card (it is not in GAMES): it is entered
+  // from the town hub only, via openRefiner() below.
+  'refiner': RefinerGame,
 };
 
 const GAME_BLURBS: Record<string, string> = {
@@ -310,6 +315,106 @@ function main(): void {
    */
   let pendingStart: boolean = false;
 
+  /**
+   * Game-swap state for the town hub / refiner (v3.1). Swing Lab is
+   * SUSPENDED, not stopped, while the player refines: stopping it
+   * would reset its node and session, and the hub is a pause, not a
+   * quit. The refiner is a fresh instance every time it opens.
+   */
+  let suspendedGame: Game | null = null;
+
+  /**
+   * The town hub overlay (Worker B, `src/hub/townHub.ts`): the manual
+   * pause screen. main.ts owns it (no import cycle — the hub imports
+   * nothing from main.ts) and registers it through the
+   * `registerHubOverlay` plug above so the pause machine can open and
+   * close it.
+   */
+  const townHub = new TownHub({
+    onResume: () => {
+      // Space / Escape / the hub's Resume button: leave the manual
+      // pause, which resumes whichever game is active (Swing Lab or
+      // the refiner) and closes the hub.
+      pause.toggleManual();
+    },
+    onOpenRefiner: () => {
+      openRefiner();
+    },
+    onReset: () => {
+      handleSaveReset();
+    },
+  });
+  registerHubOverlay(townHub);
+
+  /**
+   * Switch from the (suspended) Swing Lab to a fresh Refiner game.
+   * Called from the hub's Refiner spot. The swap happens before the
+   * manual pause is left, so the pause machine's resume event lands
+   * on the refiner (now the active game), not on Swing Lab — and the
+   * suspended game stays paused.
+   */
+  function openRefiner(): void {
+    if (activeGame instanceof RefinerGame) {
+      // Already refining (paused via Space, hub open on top): just
+      // resume it.
+      pause.toggleManual();
+      return;
+    }
+    if (activeGame === null) return;
+    suspendedGame = activeGame;
+    suspendedGame.pause();
+    const refiner = new RefinerGame(sfx);
+    refiner.onLeaveToHub = () => {
+      handleLeaveRefiner();
+    };
+    activeGame = refiner;
+    // Leave the manual pause (hub closes via onManualResume). The
+    // refiner's start() is deferred to the next update, like any game.
+    if (pause.kind === 'manual') pause.toggleManual();
+    pendingStart = true;
+  }
+
+  /**
+   * The refiner's "Leave to town" was tapped: the batch is already
+   * abandoned (the refiner does that before firing), so restore the
+   * suspended Swing Lab and reopen the hub under a manual pause.
+   */
+  function handleLeaveRefiner(): void {
+    const refiner = activeGame instanceof RefinerGame ? activeGame : null;
+    if (refiner !== null) {
+      refiner.clearLeaveRequest();
+      refiner.stop();
+    }
+    if (suspendedGame !== null) {
+      activeGame = suspendedGame;
+      suspendedGame = null;
+    }
+    // The refiner was running unpaused: toggle into a manual pause,
+    // which pauses the restored game and reopens the hub.
+    if (pause.kind === 'none') pause.toggleManual();
+  }
+
+  /**
+   * The hub's two-tap Reset cleared the save: a refiner that is
+   * active is dropped (its hopper / carried ore no longer exists)
+   * and the suspended game is restored, then the Swing Lab display
+   * is restarted so it re-reads the now-empty store — and kept
+   * paused, because the player is still sitting in the hub.
+   */
+  function handleSaveReset(): void {
+    if (activeGame instanceof RefinerGame) {
+      activeGame.stop();
+      if (suspendedGame !== null) {
+        activeGame = suspendedGame;
+        suspendedGame = null;
+      }
+    }
+    if (activeGame instanceof SwingLabGame) {
+      activeGame.restart();
+      activeGame.pause();
+    }
+  }
+
   /** Which pose-model state the gate should see for the active source. */
   function modelState(): ModelState {
     if (mediaPipe === null) return 'not-applicable';
@@ -382,6 +487,13 @@ function main(): void {
     if (activeGame !== null) {
       activeGame.stop();
       activeGame = null;
+    }
+    // A suspended Swing Lab (the refiner was open) is stopped with
+    // the game it was suspended for — otherwise its canvas listener
+    // would keep firing on a dead game.
+    if (suspendedGame !== null) {
+      suspendedGame.stop();
+      suspendedGame = null;
     }
     loop.stop();
     latestBody = null;
@@ -603,6 +715,15 @@ function main(): void {
   });
   canvas.addEventListener('pointerdown', (event) => {
     sfx.unlock();
+    // The town hub is a modal menu: while it is open, taps belong to
+    // it and are swallowed here — they must not also steer the sim
+    // body. (The games' own canvas listeners are also guarded on
+    // `paused`, so a tap cannot reach a chip underneath the hub.)
+    if (townHub.isOpen) {
+      const pixel = pointerToCanvasPx(event);
+      if (pixel !== null) townHub.handlePointer(pixel.x, pixel.y);
+      return;
+    }
     if (activeSource !== mouse) return;
     const pixel = pointerToCanvasPx(event);
     if (pixel === null) return;
@@ -631,6 +752,16 @@ function main(): void {
     if (key === 'q' && activeSource === mouse) mouse.setKeyArmAngled('left', true);
     if (key === 'e' && activeSource === mouse) mouse.setKeyArmAngled('right', true);
     if (key === ' ' && activeGame !== null) {
+      // The hub owns Space while it is open: it closes + resumes
+      // (via onResume), so the toggle below must NOT also fire —
+      // two toggles would land straight back in a manual pause.
+      // `event.key` (not the lowercased `key`) is what the hub
+      // expects: it matches ' ' / 'Escape' exactly.
+      if (townHub.isOpen) {
+        event.preventDefault();
+        townHub.handleKey(event.key);
+        return;
+      }
       // Spacebar is the pause toggle everywhere (v3.1): it used to be
       // the mouse-sim jump key, which now lives on W. `event.repeat`
       // is filtered above, so holding Space cannot toggle repeatedly.
@@ -638,10 +769,19 @@ function main(): void {
       event.preventDefault();
       pause.toggleManual();
     }
+    // Escape closes the hub while it is open (same as Space).
+    if (key === 'escape' && townHub.isOpen) {
+      townHub.handleKey(event.key);
+      return;
+    }
     // W (hold) is the mouse-sim jump key (v3.1): Space is pause now.
     // The real-camera body jump is unaffected — it comes from
     // landmarks, not the key.
     if (key === 'w' && activeSource === mouse) mouse.setJumping(true);
+    // X (hold) is the mouse-sim legs-wide key (v3.1 integration):
+    // ankles spread to the star-jump width for testing star jumps in
+    // the refiner. Real ankles need no key — they just move.
+    if (key === 'x' && activeSource === mouse) mouse.setLegsWide(true);
     if (key === 's' && activeSource === mouse) mouse.setDucking(true);
     if (key === 'm') btnMute.click();
     if (key === 'v') btnVideo.click();
@@ -658,6 +798,7 @@ function main(): void {
     if (key === 'q' && activeSource === mouse) mouse.setKeyArmAngled('left', false);
     if (key === 'e' && activeSource === mouse) mouse.setKeyArmAngled('right', false);
     if (key === 'w' && activeSource === mouse) mouse.setJumping(false);
+    if (key === 'x' && activeSource === mouse) mouse.setLegsWide(false);
     if (key === 's' && activeSource === mouse) mouse.setDucking(false);
   });
 
@@ -784,6 +925,13 @@ function main(): void {
           subtitle: '',
           showGhost: false,
         });
+      }
+
+      // Town hub (v3.1): the manual-pause screen, drawn on top of the
+      // paused game. The fallback above stands down once the hub is
+      // registered, so only one of them ever draws.
+      if (townHub.isOpen) {
+        townHub.render(context, nowMs);
       }
 
       // Live body indicator (DOM, readable on a phone): green when a

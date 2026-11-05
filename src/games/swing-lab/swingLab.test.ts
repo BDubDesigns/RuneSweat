@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { SoundEffects } from '../../core/audio';
 import type { BodyState } from '../../core/bodyState';
 import { BodyStateTracker } from '../../core/bodyState';
+import { inventory } from '../../core/inventory';
 import { MouseSource } from '../../sim/mouseSource';
 import {
   BREAK,
@@ -14,6 +15,16 @@ import {
   SwingLabGame,
   xpIntoLevel,
 } from './swingLab';
+
+/**
+ * The inventory store is a module singleton and Swing Lab now writes
+ * every hit into it (v3.1): without a reset before each test, ore/XP
+ * from one test would leak into the next test's start() — a game
+ * would start at Mining 5 with a full ore count.
+ */
+beforeEach(() => {
+  inventory.reset();
+});
 
 /** Pure Mining XP / level / node math. */
 describe('Swing Lab math', () => {
@@ -46,6 +57,9 @@ describe('Swing Lab math', () => {
  */
 describe('SwingLabGame via mouse sim', () => {
   function setup() {
+    // The inventory store is a module singleton: a hit in one test
+    // would leak ore/XP into the next test's start() without this.
+    inventory.reset();
     const mouse = new MouseSource();
     const tracker = new BodyStateTracker();
     const game = new SwingLabGame(new SoundEffects());
@@ -230,16 +244,37 @@ describe('SwingLabGame via mouse sim', () => {
     expect(ctx.game.snapshot().xp).toBe(0);
   });
 
-  it('restart resets ore, XP and swings', () => {
+  it('restart resets the session (swings, node) but keeps owned ore/XP', () => {
     const ctx = setup();
     doSwing(ctx, 0);
     expect(ctx.game.snapshot().swings).toBe(1);
     ctx.game.restart();
     const snap = ctx.game.snapshot();
     expect(snap.swings).toBe(0);
-    expect(snap.ore).toBe(0);
-    expect(snap.xp).toBe(0);
     expect(snap.nodesBroken).toBe(0);
+    // Owned ore/XP live in the inventory store (v3.1), not the session:
+    // Restart is not Reset-save, so what you earned stays earned.
+    expect(snap.ore).toBe(1);
+    expect(snap.xp).toBe(15);
+  });
+
+  it('a counted hit lands in the inventory store (ore + Mining XP)', () => {
+    const ctx = setup();
+    doSwing(ctx, 0);
+    expect(inventory.count('ferrite-shale')).toBe(1);
+    expect(inventory.xp('mining')).toBe(15);
+  });
+
+  it('start() reads owned ore/XP back from the store', () => {
+    inventory.reset();
+    inventory.add('ferrite-shale', 4);
+    inventory.addXp('mining', 250);
+    const game = new SwingLabGame(new SoundEffects());
+    game.start();
+    const snap = game.snapshot();
+    expect(snap.ore).toBe(4);
+    expect(snap.xp).toBe(250);
+    expect(snap.level).toBe(3);
   });
 
   it('hudHtml shows level, XP, ore image and swing phase', () => {
@@ -518,7 +553,7 @@ describe('Swing Lab v3: ore drops and tiers', () => {
     expect(ctx.game.snapshot().tierId).toBe('ferrite-shale');
   });
 
-  it('at Mining 5 Galvanite unlocks, pays 25 XP per hit, and restart returns to Ferrite Shale', () => {
+  it('at Mining 5 Galvanite unlocks, pays 25 XP per hit, and restart returns to Ferrite Shale (level kept)', () => {
     const ctx = setup();
     // 27 swings x 15 XP = 405 XP: Mining 5 (400 XP) with 5 XP spare.
     const t = doSwings(ctx, 27);
@@ -538,10 +573,13 @@ describe('Swing Lab v3: ore drops and tiers', () => {
     expect(after.xp).toBe(xpBefore + 25);
     expect(after.ore).toBe(oreBefore + 1);
     expect(after.oreDrops).toBe(1);
-    // A fresh game starts at Mining 1, so it starts on the level 1 mine.
+    // Restart returns to the level 1 mine, but owned XP lives in the
+    // inventory store (v3.1), so the level stays 5 — Restart is not
+    // Reset-save.
     ctx.game.restart();
     expect(ctx.game.snapshot().tierId).toBe('ferrite-shale');
-    expect(ctx.game.snapshot().level).toBe(1);
+    expect(ctx.game.snapshot().level).toBe(5);
+    expect(ctx.game.snapshot().xp).toBe(430);
   });
 
   it('mine-selector chips: tapping Ferrite selects it, tapping locked Galvanite refuses', () => {

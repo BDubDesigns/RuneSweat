@@ -223,6 +223,32 @@ export const BODY = {
   duckKneeAngleDeg: 140,
   /** Seconds a pose must be held inside tolerance to score in Dance Drop. */
   poseHoldSeconds: 0.6,
+  /**
+   * Wrist handedness latch (bodyState.ts, v3). MediaPipe's left/right
+   * wrist labels can swap when the hands meet overhead or cross, which
+   * used to flip the avatar horizontally mid-swing. The tracker keeps
+   * the previous frame's wrist positions and assigns the two detected
+   * wrists to left/right by nearest neighbour, not by the model's
+   * labels — a label swap must not move the avatar's hands.
+   *
+   * Re-latch rule: the latched mapping flips only when the alternative
+   * assignment is clearly better. `wristLatchOverwhelmTorsoFrac` is
+   * the instant case — the alternative beats the current mapping by
+   * more than this (torso lengths) in a single frame, e.g. the wrists
+   * are far apart and the labels plainly swapped. Otherwise the
+   * alternative must win continuously for `wristLatchRelatchMs`
+   * (a genuine side-switch, where the model's labels stay swapped
+   * after the person turned) before the latch follows it. The
+   * alternative must beat the current mapping by at least
+   * `wristLatchMarginTorsoFrac` to count as winning at all — that is
+   * only a tie-breaker against float noise; the 500 ms streak is what
+   * keeps the latch stable, not the margin. While a streak is running
+   * the reference positions stay frozen at the last trusted frame, or
+   * the streak could never mature (see `latchWrists` in bodyState.ts).
+   */
+  wristLatchRelatchMs: 500,
+  wristLatchOverwhelmTorsoFrac: 0.5,
+  wristLatchMarginTorsoFrac: 0.01,
 } as const;
 
 /** Space Invaders tuning. */
@@ -284,13 +310,37 @@ export const FACING = {
    * camera". Front-facing shoulders read ~0.7-1.0 torso lengths wide
    * (the mouse sim is 0.22 / 0.30 = 0.73; a typical adult's
    * shoulder-width-to-torso ratio is ~0.8); a side profile collapses
-   * toward ~0.3-0.4 as one shoulder hides behind the other. 0.6 splits
-   * the gap with margin on both sides. Below it the game shows
+   * toward ~0.3-0.4 as one shoulder hides behind the other.
+   *
+   * Was 0.6 in v2; lowered to 0.5 in v3. The Nov 4 playtest frames
+   * (t30, t66) show the hint firing while Brandon is front-facing, so
+   * 0.6 is too strict for his framing — his ratio evidently dips below
+   * it mid-swing. 0.5 still splits the gap (profile ~0.3-0.4, front
+   * ~0.7+) with margin on both sides. Below it the game shows
    * "Face the camera — I can't see you from the side" and nothing else:
    * the swing machine keeps working, because a turned player can still
    * chop — they just chop badly.
    */
-  minShoulderWidthTorsoFrac: 0.6,
+  minShoulderWidthTorsoFrac: 0.5,
+  /**
+   * Debounce (v3): a narrow-shoulder reading must persist this long
+   * (ms) before the hint shows. A single noisy frame — or a mid-swing
+   * dip while the shoulders compress — must not flash the warning at
+   * a front-facing player (t30/t66). The hint clears the moment a
+   * good reading returns; only showing it is debounced.
+   */
+  debounceMs: 500,
+  /**
+   * Second signal (v3): the nose's horizontal offset from the
+   * shoulder midpoint, in torso lengths. Front-facing the nose sits
+   * ~0-0.1 off the midline; in profile it rides out toward ~0.3+.
+   * When the nose is confidently visible, the hint fires ONLY when
+   * the shoulders are narrow AND the nose is off to the side — a
+   * front-facing player with a narrow shoulder reading stays silent.
+   * When the nose is not visible (`noseOffsetTorsoFrac` null) the
+   * shoulder width decides alone.
+   */
+  maxNoseOffsetTorsoFrac: 0.2,
 } as const;
 
 /** Swing Lab tuning (Active RuneSpace Mining prototype, Slice 1). */
@@ -322,8 +372,14 @@ export const SWING = {
    * line, so a chop to the node — which sits front-center at waist
    * height — counts without demanding the wrists reach the hips. A chop
    * that stops at chest level (-0.5) no longer counts.
+   *
+   * Moved to 0.7 in v3: the Nov 4 playtest showed Brandon having to
+   * chop too deep ("he shouldn't have to swing quite as low, it keeps
+   * losing it"). 0.7 is chest/upper-waist — the wrists finish around
+   * the node's top, not at the hips. A chop stopping at -0.6 still
+   * does not count.
    */
-  strikeLineTorsoFrac: 0.85,
+  strikeLineTorsoFrac: 0.7,
   /**
    * Hands-together line (Swing Lab v2): the wrists count as gripping
    * one pickaxe handle when they are within this many torso lengths of
@@ -341,8 +397,17 @@ export const SWING = {
    * arms slowly reads ~1-2. Measured against the mouse sim (hold A+D,
    * release): sim peak is ~7.8 torso/s after tracker smoothing, so 3.0
    * sits well below a real swing and above a slow lower.
+   *
+   * Lowered to 2.5 in v3: the 3.0 line sat too close to a real chop
+   * after the wrist One Euro filter + velocity EMA attenuate the peak
+   * (and the machine takes the MINIMUM of the two arms' peaks, so the
+   * slower arm governs). A slow lower still reads ~1-2, so 2.5 keeps
+   * the separation. The Nov 4 "sometimes doesn't register" misses are
+   * the reason — see the weak-swing detail strings in swingMachine.ts,
+   * which now report the measured peak so the next playtest can
+   * confirm which rule actually rejects.
    */
-  strikeVelocityTorsoFracPerSec: 3.0,
+  strikeVelocityTorsoFracPerSec: 2.5,
   /** Cooldown after a counted hit before the next swing can count, in ms. */
   cooldownMs: 700,
   /** Re-arm after a weak swing before input counts again, in ms. */
@@ -355,6 +420,24 @@ export const SWING = {
   orePerHit: 1,
   /** Hits to break one ore node. */
   hitsPerNode: 5,
+  /**
+   * Node break lifecycle (v3): respawn wait after a break — the progress
+   * bar fills over this long — in ms.
+   */
+  breakRespawnMs: 3000,
+  /** The respawned node fades in over this long once the wait completes, in ms. */
+  breakFadeInMs: 400,
+  /** Broken-node rock pieces fly for this long before disposal, in ms. */
+  breakPieceLifetimeMs: 1200,
+  /** Rock pieces one broken node splits into. */
+  breakPieceCount: 6,
+  /** Debris chips thrown off by every counted hit. */
+  breakDebrisPerHit: 8,
+  /** Debris chips live this long, in ms. */
+  breakDebrisLifetimeMs: 600,
+  /** Hit shake (v3, harder than v2): duration in ms and offset in px. */
+  breakShakeMs: 250,
+  breakShakePx: 12,
   /** Screen shake on a hit: duration in ms and offset in px. */
   shakeMs: 150,
   shakePx: 5,

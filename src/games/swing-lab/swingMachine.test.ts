@@ -22,6 +22,13 @@ function makeBody(options: {
   leftWristXTorso?: number;
   rightWristXTorso?: number;
   shoulderWidthTorsoFrac?: number;
+  /**
+   * Nose offset from the shoulder midpoint, in torso lengths.
+   * Default null: no nose reading, so the shoulder width decides
+   * the facing check alone (as the real tracker reports when the
+   * nose is not confidently visible).
+   */
+  noseOffsetTorsoFrac?: number | null;
   present?: boolean;
 } = {}): SwingBodyInput {
   const torsoLength = 0.3;
@@ -40,6 +47,7 @@ function makeBody(options: {
     leftWristVelY: (options.leftVel ?? 0) * torsoLength,
     rightWristVelY: (options.rightVel ?? 0) * torsoLength,
     shoulderWidthTorsoFrac: options.shoulderWidthTorsoFrac ?? 1.0,
+    noseOffsetTorsoFrac: options.noseOffsetTorsoFrac ?? null,
   };
 }
 
@@ -74,13 +82,21 @@ const CROSSED_SLOW = makeBody({
 });
 
 /**
- * Both arms at chest level (-0.6): past the OLD strike line (0.5) but
- * above the new waist-level line (0.85). A chop that stops here must
- * NOT count.
+ * Both arms at chest level (-0.6): above the v3 strike line (0.7), so a
+ * chop that stops here must NOT count — but it is closer than the old
+ * waist-level line (0.85), which is the point of the v3 raise.
  */
 const AT_CHEST_FAST = makeBody({
   leftHeight: -0.6,
   rightHeight: -0.6,
+  leftVel: 5,
+  rightVel: 5,
+});
+
+/** Both arms past the v3 strike line (-0.75), still moving fast. */
+const CROSSED_AT_NEW_LINE_FAST = makeBody({
+  leftHeight: -0.75,
+  rightHeight: -0.75,
   leftVel: 5,
   rightVel: 5,
 });
@@ -186,6 +202,9 @@ describe('SwingMachine', () => {
       reason: 'too-small',
       message: 'Swing bigger!',
     });
+    // The detail names the miss: highest 0.4 of the 0.6 windup.
+    expect(machine.snapshot().lastWeakDetail).toContain('never wound');
+    expect(machine.snapshot().lastWeakDetail).toContain('highest 0.40');
   });
 
   it('says nothing for a partway raise of ONE arm dropped fast', () => {
@@ -201,7 +220,7 @@ describe('SwingMachine', () => {
     expect(machine.snapshot().lastEvent).toBeNull();
   });
 
-  it('rejects a windup dropped slowly: "Swing faster!"', () => {
+  it('rejects a windup dropped slowly: "Swing faster!" with the measured peak', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
     machine.update(WOUND, 100);
@@ -217,6 +236,47 @@ describe('SwingMachine', () => {
       reason: 'too-slow',
       message: 'Swing faster!',
     });
+    // The snapshot carries the evidence: peak 1.0 vs the 2.5 threshold.
+    expect(machine.snapshot().lastWeakDetail).toBe(
+      `peak 1.0 torso/s, need ${SWING.strikeVelocityTorsoFracPerSec}`,
+    );
+  });
+
+  it('counts a chop at peak 2.7 torso/s (above the loosened 2.5 line)', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    machine.update(
+      makeBody({ leftHeight: 0.3, rightHeight: 0.3, leftVel: 2.7, rightVel: 2.7 }),
+      200,
+    );
+    // 2.7 would have failed the old 3.0 threshold; the v3 loosen is
+    // what counts it.
+    const event = machine.update(
+      makeBody({ leftHeight: -1.0, rightHeight: -1.0, leftVel: 2.7, rightVel: 2.7 }),
+      300,
+    );
+    expect(event?.kind).toBe('hit');
+  });
+
+  it('still rejects a chop at peak 2.0 torso/s as too slow', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    machine.update(
+      makeBody({ leftHeight: 0.3, rightHeight: 0.3, leftVel: 2.0, rightVel: 2.0 }),
+      200,
+    );
+    const event = machine.update(
+      makeBody({ leftHeight: -1.0, rightHeight: -1.0, leftVel: 2.0, rightVel: 2.0 }),
+      300,
+    );
+    expect(event).toEqual({
+      kind: 'weak',
+      reason: 'too-slow',
+      message: 'Swing faster!',
+    });
+    expect(machine.snapshot().lastWeakDetail).toContain('peak 2.0 torso/s');
   });
 
   it('judges the pair on the SLOWER arm: one fast arm cannot carry the swing', () => {
@@ -266,7 +326,7 @@ describe('SwingMachine', () => {
     ).toBeNull();
   });
 
-  it('rejects a wound pair that separates during the drop: "Both hands together!"', () => {
+  it('rejects a wound pair that separates during the drop: "Both hands together!" with the gap', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
     machine.update(WOUND, 100);
@@ -280,6 +340,8 @@ describe('SwingMachine', () => {
       reason: 'hands-apart',
       message: 'Both hands together!',
     });
+    // Wrists 0.8 torso apart vs the 0.5 limit: the gap is the evidence.
+    expect(machine.snapshot().lastWeakDetail).toContain('gap 0.80 torso');
   });
 
   it('rejects hands apart at the strike line, even on a slow drop', () => {
@@ -322,17 +384,29 @@ describe('SwingMachine', () => {
     });
   });
 
-  it('does NOT count a chop that stops at chest level (old strike line)', () => {
+  it('does NOT count a chop that stops at chest level (-0.6, above the 0.7 line)', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
     machine.update(WOUND, 100);
     machine.update(DROPPING_FAST, 200);
     expect(machine.currentPhase).toBe('strike');
-    // -0.6 crossed the v1 line (0.5) but not the v2 waist line (0.85).
+    // -0.6 has not crossed the v3 line (0.7).
     expect(machine.update(AT_CHEST_FAST, 300)).toBeNull();
     expect(machine.currentPhase).toBe('strike');
     // Following through to the waist counts.
     expect(machine.update(CROSSED_FAST, 400)?.kind).toBe('hit');
+  });
+
+  it('counts a swing finishing at the raised strike line (-0.75 past 0.7)', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(WOUND, 100);
+    machine.update(DROPPING_FAST, 200);
+    expect(machine.currentPhase).toBe('strike');
+    // -0.75 crosses the v3 line (0.7) but would NOT have crossed the
+    // old waist line (0.85): the v3 raise is what counts this chop.
+    const event = machine.update(CROSSED_AT_NEW_LINE_FAST, 300);
+    expect(event?.kind).toBe('hit');
   });
 
   it('blocks a double-count from one swing during the cooldown', () => {
@@ -378,7 +452,7 @@ describe('SwingMachine', () => {
     expect(machine.update(CROSSED_FAST, 1000)?.kind).toBe('hit');
   });
 
-  it('rejects a fast flick pulled back up before the strike line', () => {
+  it('rejects a fast flick pulled back up before the strike line: "Follow through!"', () => {
     const machine = new SwingMachine();
     machine.update(REST, 0);
     machine.update(WOUND, 100);
@@ -390,8 +464,11 @@ describe('SwingMachine', () => {
     expect(event).toEqual({
       kind: 'weak',
       reason: 'too-small',
-      message: 'Swing bigger!',
+      message: 'Follow through!',
     });
+    // Distinct from "Swing bigger!" (never wound): this one wound and
+    // pulled back. The detail says so.
+    expect(machine.snapshot().lastWeakDetail).toContain('pulled back overhead');
   });
 
   it('does NOT call a settled windup starting its drop a flick', () => {
@@ -497,12 +574,29 @@ describe('facingOkFor', () => {
     expect(facingOkFor(null)).toBe(true);
   });
 
-  it('is true front-facing, at the threshold, and false in profile', () => {
+  it('is true front-facing, at the v3 threshold, and false in profile', () => {
     expect(facingOkFor(1.0)).toBe(true);
     expect(facingOkFor(0.73)).toBe(true);
-    expect(facingOkFor(0.6)).toBe(true);
-    expect(facingOkFor(0.59)).toBe(false);
+    expect(facingOkFor(0.5)).toBe(true);
+    expect(facingOkFor(0.49)).toBe(false);
     expect(facingOkFor(0.3)).toBe(false);
+  });
+
+  it('lets a centred nose veto a narrow shoulder reading (t30/t66)', () => {
+    // Front-facing, shoulders reading narrow, nose on the midline:
+    // the Nov 4 frames showed this exact shape firing the hint.
+    expect(facingOkFor(0.3, 0.05)).toBe(true);
+    expect(facingOkFor(0.3, 0.2)).toBe(true);
+  });
+
+  it('still warns when narrow shoulders AND the nose is off to the side', () => {
+    expect(facingOkFor(0.3, 0.3)).toBe(false);
+    expect(facingOkFor(0.3, 0.5)).toBe(false);
+  });
+
+  it('falls back to the width alone when the nose is not visible', () => {
+    expect(facingOkFor(0.3, null)).toBe(false);
+    expect(facingOkFor(0.73, null)).toBe(true);
   });
 });
 
@@ -513,8 +607,65 @@ describe('SwingMachine facingOk snapshot', () => {
     machine.update(REST, 0);
     expect(machine.snapshot().facingOk).toBe(true);
     machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 100);
-    expect(machine.snapshot().facingOk).toBe(false);
-    expect(machine.update(null, 200)).toBeNull();
+    // Debounce: one bad frame does not show the hint yet.
     expect(machine.snapshot().facingOk).toBe(true);
+    // Sustained past the 500ms debounce, the hint shows.
+    machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 700);
+    expect(machine.snapshot().facingOk).toBe(false);
+    expect(machine.update(null, 800)).toBeNull();
+    expect(machine.snapshot().facingOk).toBe(true);
+  });
+
+  it('does NOT show the hint for a brief dip below the threshold', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    // 300ms of narrow shoulders: under the 500ms debounce.
+    machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 100);
+    machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 300);
+    expect(machine.snapshot().facingOk).toBe(true);
+    // Back to front-facing before the debounce elapses: no hint, and
+    // the streak resets — a later dip starts the clock again.
+    machine.update(REST, 400);
+    expect(machine.snapshot().facingOk).toBe(true);
+    machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 500);
+    expect(machine.snapshot().facingOk).toBe(true);
+  });
+
+  it('clears the hint the moment a good reading returns', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 100);
+    machine.update(makeBody({ shoulderWidthTorsoFrac: 0.3 }), 700);
+    expect(machine.snapshot().facingOk).toBe(false);
+    machine.update(REST, 800);
+    expect(machine.snapshot().facingOk).toBe(true);
+  });
+
+  it('stays silent for narrow shoulders with a centred nose, however long', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    // The t30/t66 shape, held for 2 seconds: narrow shoulders, nose
+    // on the midline. The nose vetoes the hint outright.
+    for (let t = 100; t <= 2000; t += 100) {
+      machine.update(
+        makeBody({ shoulderWidthTorsoFrac: 0.3, noseOffsetTorsoFrac: 0.05 }),
+        t,
+      );
+    }
+    expect(machine.snapshot().facingOk).toBe(true);
+  });
+
+  it('shows the hint for narrow shoulders with the nose off to the side', () => {
+    const machine = new SwingMachine();
+    machine.update(REST, 0);
+    machine.update(
+      makeBody({ shoulderWidthTorsoFrac: 0.3, noseOffsetTorsoFrac: 0.35 }),
+      100,
+    );
+    machine.update(
+      makeBody({ shoulderWidthTorsoFrac: 0.3, noseOffsetTorsoFrac: 0.35 }),
+      700,
+    );
+    expect(machine.snapshot().facingOk).toBe(false);
   });
 });

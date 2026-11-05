@@ -121,6 +121,25 @@ export interface BodyState {
    * (`FACING.minShoulderWidthTorsoFrac`) — never the body gate.
    */
   shoulderWidthTorsoFrac: number;
+  /**
+   * The nose's horizontal offset from the shoulder midpoint, in torso
+   * lengths (0 when the nose is centred over the shoulders, larger as
+   * the face turns away). `null` when the nose is not confidently
+   * visible, so there is no second opinion to offer. Second signal
+   * for the face-the-camera HINT (v3): a front-facing player whose
+   * shoulder reading dips narrow still has a centred nose.
+   */
+  noseOffsetTorsoFrac: number | null;
+  /**
+   * The wrist handedness latch is currently inverted relative to the
+   * model's labels: the latched left wrist is coming from the model's
+   * RIGHT_WRIST landmark (and vice versa). True after the model swapped
+   * its left/right labels mid-pose and the latch held the physical
+   * hands steady — the avatar did NOT flip. Debug HUD shows this so
+   * a flip (or a latch) is visible in the next playtest. False on a
+   * fresh body and whenever the labels agree with the latch.
+   */
+  wristLatchSwapped: boolean;
   /** Mean visibility of shoulders + hips (0..1). */
   visibilityScore: number;
   leftArm: ArmState;
@@ -363,6 +382,22 @@ export class BodyStateTracker {
   /** Current EMA-smoothed wrist velocities (normalized units/sec). */
   private leftWristVelY = 0;
   private rightWristVelY = 0;
+  /**
+   * Handedness latch (v3): the previous frame's LATCHED wrist positions
+   * (raw video space, before smoothing). Each new frame assigns the two
+   * detected wrist landmarks to left/right by nearest neighbour to
+   * these, not by the model's labels — see `latchWrists()`.
+   */
+  private prevLatchedLeftWrist: { x: number; y: number } | null = null;
+  private prevLatchedRightWrist: { x: number; y: number } | null = null;
+  /** Latched left currently comes from the model's RIGHT_WRIST label. */
+  private wristLatchSwapped = false;
+  /**
+   * Timestamp (ms) the alternative wrist assignment started winning
+   * continuously, or null when the current mapping is winning. The
+   * re-latch streak — see `latchWrists()`.
+   */
+  private swapStreakSinceMs: number | null = null;
 
   public reset(): void {
     this.torsoFilter.reset();
@@ -387,6 +422,12 @@ export class BodyStateTracker {
     this.prevWristTSeconds = null;
     this.leftWristVelY = 0;
     this.rightWristVelY = 0;
+    // A vanished body unseeds the latch: a reappearing body is trusted
+    // on its labels for one frame, then latched from there.
+    this.prevLatchedLeftWrist = null;
+    this.prevLatchedRightWrist = null;
+    this.wristLatchSwapped = false;
+    this.swapStreakSinceMs = null;
   }
 
   /**
@@ -408,6 +449,111 @@ export class BodyStateTracker {
     const raw = (ySm - prevY) / dt;
     const alpha = SWING.wristVelEmaAlpha;
     return alpha * raw + (1 - alpha) * prevVel;
+  }
+
+  /**
+   * Handedness latch (v3): assign the two detected wrist landmarks to
+   * the tracker's left/right identities by continuity, not by the
+   * model's labels.
+   *
+   * The problem: when the hands meet overhead or cross, MediaPipe's
+   * left/right wrist labels can swap, and following the labels would
+   * flip the avatar horizontally mid-swing ("which hand is which").
+   * The fix: keep the previous frame's latched wrist positions and
+   * pick the assignment (labels as-is, or swapped) whose wrists land
+   * closest to them. A label swap moves each wrist by the inter-wrist
+   * distance while the physical hands barely moved, so the swapped
+   * assignment wins and the avatar's hands stay put.
+   *
+   * The latched mapping is sticky — it flips only when the alternative
+   * is clearly better, so one noisy frame cannot flip the avatar:
+   * - Overwhelming: the alternative beats the current mapping by more
+   *   than `BODY.wristLatchOverwhelmTorsoFrac` in one frame — flip at
+   *   once. This is the common case: wrists apart, labels plainly
+   *   swapped, or a genuine side-switch after the person turned.
+   * - Sustained: the alternative beats the current mapping by at least
+   *   `BODY.wristLatchMarginTorsoFrac`, continuously, for
+   *   `BODY.wristLatchRelatchMs` — flip then. This is the close-hands
+   *   case: the evidence per frame is small (the wrists are nearly
+   *   coincident, so either assignment looks the same), and the avatar
+   *   shows the swapped hands for at most the relatch window while the
+   *   streak runs — a tiny visual error, since the hands are together.
+   *   A genuine side-switch (person actually turns around, model
+   *   re-acquires with the labels the other way) re-latches this way.
+   *   Anything less than the margin resets the streak.
+   *
+   * A slow turn needs no re-latch at all: the model's labels track the
+   * physical hands continuously through it, so the current mapping
+   * keeps winning every frame and the avatar's left hand follows the
+   * physical left hand around.
+   *
+   * Returns the latched wrists (raw video space) plus whether the
+   * latched left currently comes from the model's RIGHT_WRIST label.
+   */
+  private latchWrists(
+    modelLeft: NormalizedLandmark,
+    modelRight: NormalizedLandmark,
+    torsoLength: number,
+    timestampMs: number,
+  ): {
+    left: NormalizedLandmark;
+    right: NormalizedLandmark;
+    swapped: boolean;
+  } {
+    const prevLeft = this.prevLatchedLeftWrist;
+    const prevRight = this.prevLatchedRightWrist;
+    if (prevLeft === null || prevRight === null) {
+      // First frame with a body: trust the labels, seed the latch.
+      this.prevLatchedLeftWrist = { x: modelLeft.x, y: modelLeft.y };
+      this.prevLatchedRightWrist = { x: modelRight.x, y: modelRight.y };
+      this.wristLatchSwapped = false;
+      this.swapStreakSinceMs = null;
+      return { left: modelLeft, right: modelRight, swapped: false };
+    }
+    const dist = (
+      a: NormalizedLandmark,
+      b: { x: number; y: number },
+    ): number => Math.hypot(a.x - b.x, a.y - b.y) / torsoLength;
+    // Cost of the current mapping vs the alternative, in torso lengths.
+    const keepLeft = this.wristLatchSwapped ? modelRight : modelLeft;
+    const keepRight = this.wristLatchSwapped ? modelLeft : modelRight;
+    const costKeep = dist(keepLeft, prevLeft) + dist(keepRight, prevRight);
+    const costFlip = dist(keepRight, prevLeft) + dist(keepLeft, prevRight);
+    const flipAdvantage = costKeep - costFlip;
+    if (flipAdvantage > BODY.wristLatchOverwhelmTorsoFrac) {
+      // Overwhelming evidence: flip at once.
+      this.wristLatchSwapped = !this.wristLatchSwapped;
+      this.swapStreakSinceMs = null;
+    } else if (flipAdvantage > BODY.wristLatchMarginTorsoFrac) {
+      // Alternative winning, but not overwhelmingly: start/continue
+      // the streak; flip only once it has held for the relatch window.
+      if (this.swapStreakSinceMs === null) {
+        this.swapStreakSinceMs = timestampMs;
+      } else if (
+        timestampMs - this.swapStreakSinceMs >=
+        BODY.wristLatchRelatchMs
+      ) {
+        this.wristLatchSwapped = !this.wristLatchSwapped;
+        this.swapStreakSinceMs = null;
+      }
+    } else {
+      // Current mapping winning (or tied): clear the streak.
+      this.swapStreakSinceMs = null;
+    }
+    const left = this.wristLatchSwapped ? modelRight : modelLeft;
+    const right = this.wristLatchSwapped ? modelLeft : modelRight;
+    // Reference advance: while a streak is running, the reference stays
+    // frozen at the last trusted positions. If it advanced every frame,
+    // the first swapped frame would move it onto the swapped labels and
+    // the current mapping would look perfect from then on — the streak
+    // could never mature and no re-latch could ever fire. The reference
+    // advances on the flip frame and on every frame the current mapping
+    // is winning (including the frame a streak clears).
+    if (this.swapStreakSinceMs === null) {
+      this.prevLatchedLeftWrist = { x: left.x, y: left.y };
+      this.prevLatchedRightWrist = { x: right.x, y: right.y };
+    }
+    return { left, right, swapped: this.wristLatchSwapped };
   }
 
   /**
@@ -436,6 +582,8 @@ export class BodyStateTracker {
         torsoY: 0.5,
         torsoLength: 0,
         shoulderWidthTorsoFrac: 0,
+        noseOffsetTorsoFrac: null,
+        wristLatchSwapped: false,
         visibilityScore: 0,
         leftArm: neutralArm('left'),
         rightArm: neutralArm('right'),
@@ -457,6 +605,7 @@ export class BodyStateTracker {
     const rk = lm[PoseLandmark.RIGHT_KNEE];
     const la = lm[PoseLandmark.LEFT_ANKLE];
     const ra = lm[PoseLandmark.RIGHT_ANKLE];
+    const nose = lm[PoseLandmark.NOSE];
     if (
       ls === undefined || rs === undefined || lh === undefined || rh === undefined ||
       lw === undefined || rw === undefined || lk === undefined || rk === undefined ||
@@ -480,6 +629,8 @@ export class BodyStateTracker {
         torsoY: 0.5,
         torsoLength: 0,
         shoulderWidthTorsoFrac: 0,
+        noseOffsetTorsoFrac: null,
+        wristLatchSwapped: false,
         visibilityScore: 0,
         leftArm: neutralArm('left'),
         rightArm: neutralArm('right'),
@@ -496,6 +647,13 @@ export class BodyStateTracker {
       landmarkDistance(shoulderMid, hipMid),
       1e-6,
     );
+    // Nose offset from the shoulder midpoint (facing second signal):
+    // null when the nose is not confidently visible, so callers fall
+    // back to the shoulder-width ratio alone.
+    const noseOffsetTorsoFrac =
+      nose !== undefined && (nose.visibility ?? 0) >= GATE.minVisibility
+        ? Math.abs(nose.x - shoulderMid.x) / torsoLength
+        : null;
     const visibilityScore =
       ((ls.visibility ?? 0) +
         (rs.visibility ?? 0) +
@@ -514,11 +672,20 @@ export class BodyStateTracker {
       tSeconds,
     );
 
-    // Wrist positions (smoothed) + vertical velocities. Velocity is the
-    // frame-to-frame change of the SMOOTHED wrist Y over the timestamp
-    // delta — raw landmark jitter would spike a velocity taken from raw Y.
-    const leftWristSm = this.leftWristFilter.filter(lw.x, lw.y, tSeconds);
-    const rightWristSm = this.rightWristFilter.filter(rw.x, rw.y, tSeconds);
+    // Wrist positions: latched FIRST (continuity, not model labels —
+    // see latchWrists), then smoothed. The filters track the physical
+    // hands, so a label swap cannot jump them across the body.
+    const latched = this.latchWrists(lw, rw, torsoLength, timestampMs);
+    const leftWristSm = this.leftWristFilter.filter(
+      latched.left.x,
+      latched.left.y,
+      tSeconds,
+    );
+    const rightWristSm = this.rightWristFilter.filter(
+      latched.right.x,
+      latched.right.y,
+      tSeconds,
+    );
     this.leftWristVelY = this.wristVelocity(
       this.prevLeftWristY,
       this.leftWristVelY,
@@ -545,10 +712,10 @@ export class BodyStateTracker {
     const baselineY = this.hipBaselineY;
 
     const leftArm = this.deriveArm(
-      'left', ls, lw, torsoLength, tSeconds, this.leftAngleFilter,
+      'left', ls, latched.left, torsoLength, tSeconds, this.leftAngleFilter,
     );
     const rightArm = this.deriveArm(
-      'right', rs, rw, torsoLength, tSeconds, this.rightAngleFilter,
+      'right', rs, latched.right, torsoLength, tSeconds, this.rightAngleFilter,
     );
 
     const hipRise = baselineY - hipMid.y;
@@ -605,6 +772,8 @@ export class BodyStateTracker {
       torsoY: torso.y,
       torsoLength,
       shoulderWidthTorsoFrac,
+      noseOffsetTorsoFrac,
+      wristLatchSwapped: latched.swapped,
       visibilityScore,
       leftArm,
       rightArm,

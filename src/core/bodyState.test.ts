@@ -251,6 +251,120 @@ describe('BodyStateTracker bodyUsable', () => {
   });
 });
 
+describe('BodyStateTracker wrist handedness latch', () => {
+  /** Swap the LEFT_WRIST / RIGHT_WRIST landmarks, as if the model swapped its labels. */
+  function swapWristLabels(
+    pose: NormalizedLandmark[],
+  ): NormalizedLandmark[] {
+    const swapped = [...pose];
+    const lw = swapped[PoseLandmark.LEFT_WRIST];
+    const rw = swapped[PoseLandmark.RIGHT_WRIST];
+    if (lw === undefined || rw === undefined) return swapped;
+    swapped[PoseLandmark.LEFT_WRIST] = rw;
+    swapped[PoseLandmark.RIGHT_WRIST] = lw;
+    return swapped;
+  }
+
+  it('holds the physical hands steady when the model swaps its wrist labels (wrists apart)', () => {
+    const tracker = new BodyStateTracker();
+    // Arms raised slightly outward: wrists ~0.33 apart (1.1 torso), so
+    // a label swap is overwhelming evidence and the latch flips at once.
+    const pose = makePose({ leftArmDeg: -10, rightArmDeg: 10 });
+    const first = tracker.update(makeFrame(pose, 1000));
+    expect(first.wristLatchSwapped).toBe(false);
+    const leftX = first.leftWristX;
+    const rightX = first.rightWristX;
+    expect(leftX).toBeLessThan(rightX);
+
+    // Same body, labels swapped: the avatar's hands must NOT move.
+    const second = tracker.update(makeFrame(swapWristLabels(pose), 1033));
+    expect(second.wristLatchSwapped).toBe(true);
+    expect(second.leftWristX).toBeCloseTo(leftX, 1);
+    expect(second.rightWristX).toBeCloseTo(rightX, 1);
+    expect(second.leftWristX).toBeLessThan(second.rightWristX);
+    // The arms still read raised: the latch feeds the arm derivation.
+    expect(second.leftArm.raised).toBe(true);
+    expect(second.rightArm.raised).toBe(true);
+  });
+
+  it('holds off on a close-hands swap, then re-latches once it persists', () => {
+    const tracker = new BodyStateTracker();
+    // Arms angled inward overhead: wrists ~0.05 apart (0.18 torso), so
+    // a label swap is small evidence — inside the relatch window, not
+    // overwhelming. This is the clasped-hands case from the Nov 4
+    // playtest: the hands are together, so either assignment looks
+    // almost the same.
+    const pose = makePose({ leftArmDeg: 15, rightArmDeg: -15 });
+    const first = tracker.update(makeFrame(pose, 1000));
+    const leftX = first.leftWristX;
+    expect(first.wristLatchSwapped).toBe(false);
+
+    // Labels swap: the latch does NOT flip yet (streak running).
+    const swapped = swapWristLabels(pose);
+    const second = tracker.update(makeFrame(swapped, 1033));
+    expect(second.wristLatchSwapped).toBe(false);
+    // Keep feeding swapped-label frames at ~33ms. The streak started
+    // at 1033, so the flip lands once a frame arrives at >= 1533.
+    // A few extra frames after the flip let the smoothed wrist settle
+    // back onto the physical left hand before asserting its position.
+    let state = second;
+    for (let t = 1066; t <= 1700; t += 33) {
+      state = tracker.update(makeFrame(swapped, t));
+    }
+    expect(state.wristLatchSwapped).toBe(true);
+    // After the re-latch the left wrist is the physical left hand again.
+    expect(state.leftWristX).toBeCloseTo(leftX, 1);
+    expect(state.leftWristX).toBeLessThan(state.rightWristX);
+  });
+
+  it('reseeds the latch after the body disappears', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({ leftArmDeg: -10, rightArmDeg: 10 });
+    tracker.update(makeFrame(pose, 1000));
+    const swapped = tracker.update(makeFrame(swapWristLabels(pose), 1033));
+    expect(swapped.wristLatchSwapped).toBe(true);
+    // Body gone: latch state clears.
+    tracker.update(makeFrame(null, 1066));
+    // The same swapped-labels pose reappears: fresh seed trusts the
+    // labels for one frame, so the latch is not swapped.
+    const back = tracker.update(makeFrame(swapWristLabels(pose), 1100));
+    expect(back.wristLatchSwapped).toBe(false);
+  });
+});
+
+describe('BodyStateTracker noseOffsetTorsoFrac', () => {
+  it('is ~0 front-facing (nose over the shoulder midpoint)', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(makePose({}), 1000));
+    expect(state.noseOffsetTorsoFrac).toBeCloseTo(0, 2);
+  });
+
+  it('grows as the nose moves off the shoulder midpoint', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({});
+    // Nose 0.09 to the side of the midline: 0.09 / 0.30 torso = 0.3.
+    pose[PoseLandmark.NOSE] = { x: 0.59, y: 0.16, visibility: 0.99 };
+    const state = tracker.update(makeFrame(pose, 1000));
+    expect(state.noseOffsetTorsoFrac).toBeCloseTo(0.3, 2);
+  });
+
+  it('is null when the nose is not confidently visible', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      visibilityOverrides: { [PoseLandmark.NOSE]: 0.1 },
+    });
+    const state = tracker.update(makeFrame(pose, 1000));
+    expect(state.noseOffsetTorsoFrac).toBeNull();
+  });
+
+  it('is null when there is no body', () => {
+    const tracker = new BodyStateTracker();
+    const state = tracker.update(makeFrame(null, 1000));
+    expect(state.noseOffsetTorsoFrac).toBeNull();
+    expect(state.wristLatchSwapped).toBe(false);
+  });
+});
+
 describe('poseMatchScore', () => {
   it('scores 1 for a pose against its own joint angles', () => {
     const pose = makePose({ leftArmDeg: -90, rightArmDeg: 90 });

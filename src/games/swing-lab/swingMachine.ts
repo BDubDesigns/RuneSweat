@@ -70,6 +70,12 @@
  * `FACING.minShoulderWidthTorsoFrac` — the player is turned sideways.
  * The render code shows "Face the camera — I can't see you from the
  * side" and nothing else changes: the machine keeps judging swings.
+ * v3: the reading must stay low for `FACING.debounceMs` before the
+ * hint shows (a transient dip mid-swing is not a sideways player),
+ * and when the nose is confidently visible the hint also needs the
+ * nose off to the side (`FACING.maxNoseOffsetTorsoFrac`) — a
+ * front-facing player with a narrow shoulder reading stays silent.
+ * See `facingOkFor()`.
  *
  * Weak swings cost nothing (no XP, no ore) and re-arm quickly
  * (`SWING.weakRearmMs`, shorter than the hit cooldown) so a kid can
@@ -92,6 +98,7 @@ export type SwingBodyInput = Pick<
   | 'leftWristVelY'
   | 'rightWristVelY'
   | 'shoulderWidthTorsoFrac'
+  | 'noseOffsetTorsoFrac'
 >;
 
 export type SwingPhase = 'ready' | 'windup' | 'strike' | 'recover';
@@ -105,6 +112,14 @@ export type SwingHandedness = 'two-handed' | 'left' | 'right';
 
 export type WeakReason = 'too-small' | 'too-slow' | 'hands-apart';
 
+/**
+ * Why the swing failed, in the player's words. The two 'too-small'
+ * paths say different things since v3: a raise that never reached
+ * the windup line is "Swing bigger!" (not wound up), while a wound
+ * pair pulled back overhead before the strike line is
+ * "Follow through!" (too shallow — no follow-through). They used to
+ * share one message, so the last-swing line could not tell them apart.
+ */
 export interface SwingHitEvent {
   kind: 'hit';
   handedness: SwingHandedness;
@@ -114,7 +129,11 @@ export interface SwingHitEvent {
 export interface SwingWeakEvent {
   kind: 'weak';
   reason: WeakReason;
-  message: 'Swing bigger!' | 'Swing faster!' | 'Both hands together!';
+  message:
+    | 'Swing bigger!'
+    | 'Swing faster!'
+    | 'Both hands together!'
+    | 'Follow through!';
 }
 
 export type SwingEvent = SwingHitEvent | SwingWeakEvent;
@@ -135,26 +154,52 @@ export interface SwingSnapshot {
   rightVel: number;
   /**
    * Face-the-camera hint: true when there is no body (nothing to warn
-   * about) or the shoulder-width ratio is at/above
-   * `FACING.minShoulderWidthTorsoFrac`. Advisory only, never a gate.
+   * about), the shoulder-width ratio is at/above
+   * `FACING.minShoulderWidthTorsoFrac`, or the debounced hint is not
+   * active. Advisory only, never a gate. See `facingOkFor()` and the
+   * debounce in `update()`.
    */
   facingOk: boolean;
   /** Last hit / weak-swing event (null until the first swing attempt). */
   lastEvent: SwingEvent | null;
+  /**
+   * Measured numbers behind the last WEAK event (null after a hit or
+   * before any weak swing): peak velocity vs threshold, wrist gap vs
+   * limit, how high the raise got vs the windup line. The "last swing"
+   * line names the failed check; this is the evidence — the debug HUD
+   * shows it so the next playtest can say which rule actually
+   * rejected a swing instead of "sometimes doesn't register".
+   */
+  lastWeakDetail: string | null;
 }
 
 /**
  * Is this shoulder-width ratio facing the camera? Pure helper for the
- * facing check: `null` means no body, so there is nothing to warn about.
- * Unit-tested; the machine calls it on every snapshot.
+ * facing check: `null` width means no body, so there is nothing to warn
+ * about. Unit-tested; the machine calls it on every update and debounces
+ * the result before the snapshot shows the hint.
+ *
+ * Two signals (v3): the shoulder width alone misfired on front-facing
+ * players in the Nov 4 playtest (t30/t66), so when the nose is
+ * confidently visible (`noseOffset` not null) the hint needs BOTH
+ * signals to agree it is a profile — narrow shoulders AND the nose off
+ * to the side. A centred nose vetoes the hint: front-facing, however
+ * narrow the shoulders read. With no nose reading the width decides
+ * alone, as before.
  */
 export function facingOkFor(
   shoulderWidthTorsoFrac: number | null,
+  noseOffsetTorsoFrac: number | null = null,
 ): boolean {
-  return (
+  if (
     shoulderWidthTorsoFrac === null ||
     shoulderWidthTorsoFrac >= FACING.minShoulderWidthTorsoFrac
-  );
+  ) {
+    return true;
+  }
+  // Narrow shoulders: ask the nose. Centred nose = facing the camera.
+  if (noseOffsetTorsoFrac === null) return false;
+  return noseOffsetTorsoFrac <= FACING.maxNoseOffsetTorsoFrac;
 }
 
 export class SwingMachine {
@@ -176,9 +221,21 @@ export class SwingMachine {
   private soloPeakVel = 0;
   private soloDroppedBelowWindup = false;
   private lastEvent: SwingEvent | null = null;
+  private lastWeakDetail: string | null = null;
   private lastHeights = { left: 0, right: 0 };
   private lastVels = { left: 0, right: 0 };
   private lastShoulderWidth: number | null = null;
+  private lastNoseOffset: number | null = null;
+  /**
+   * Facing debounce (v3): when the facing reading first went bad
+   * (ms), or null when the latest reading is good. The hint shows
+   * only after the bad reading has persisted `FACING.debounceMs`.
+   */
+  private facingBadSinceMs: number | null = null;
+  /** Debounced hint state, read by `snapshot()`. */
+  private facingHintActive = false;
+  /** Highest the pair's lower wrist got during a partial attempt. */
+  private pairTopHeight = 0;
 
   public reset(): void {
     this.phase = 'ready';
@@ -186,9 +243,13 @@ export class SwingMachine {
     this.rearmUntilMs = 0;
     this.clearAttempt();
     this.lastEvent = null;
+    this.lastWeakDetail = null;
     this.lastHeights = { left: 0, right: 0 };
     this.lastVels = { left: 0, right: 0 };
     this.lastShoulderWidth = null;
+    this.lastNoseOffset = null;
+    this.facingBadSinceMs = null;
+    this.facingHintActive = false;
   }
 
   /** Current phase, for the game + HUD. */
@@ -217,8 +278,9 @@ export class SwingMachine {
       rightHeight: this.lastHeights.right,
       leftVel: this.lastVels.left,
       rightVel: this.lastVels.right,
-      facingOk: facingOkFor(this.lastShoulderWidth),
+      facingOk: !this.facingHintActive,
       lastEvent: this.lastEvent,
+      lastWeakDetail: this.lastWeakDetail,
     };
   }
 
@@ -233,6 +295,9 @@ export class SwingMachine {
       this.lastHeights = { left: 0, right: 0 };
       this.lastVels = { left: 0, right: 0 };
       this.lastShoulderWidth = null;
+      this.lastNoseOffset = null;
+      this.facingBadSinceMs = null;
+      this.facingHintActive = false;
       return null;
     }
 
@@ -245,6 +310,23 @@ export class SwingMachine {
     this.lastHeights = { left: leftHeight, right: rightHeight };
     this.lastVels = { left: leftVel, right: rightVel };
     this.lastShoulderWidth = body.shoulderWidthTorsoFrac;
+    this.lastNoseOffset = body.noseOffsetTorsoFrac;
+
+    // Facing debounce (v3): the hint shows only after a bad reading
+    // has persisted FACING.debounceMs. A transient dip — one noisy
+    // frame, shoulders compressing mid-swing — must not flash the
+    // warning at a front-facing player (Nov 4 frames t30/t66). The
+    // hint clears the moment a good reading returns.
+    if (facingOkFor(this.lastShoulderWidth, this.lastNoseOffset)) {
+      this.facingBadSinceMs = null;
+      this.facingHintActive = false;
+    } else {
+      if (this.facingBadSinceMs === null) {
+        this.facingBadSinceMs = nowMs;
+      }
+      this.facingHintActive =
+        nowMs - this.facingBadSinceMs >= FACING.debounceMs;
+    }
 
     // Wrist-to-wrist distance, in torso lengths: the "gripping one
     // handle" signal. Clasped hands read ~0.05-0.15 apart.
@@ -274,7 +356,8 @@ export class SwingMachine {
     }
     if (this.phase === 'windup') {
       return this.stepDrop(
-        leftHeight, rightHeight, leftVel, rightVel, handsTogether, nowMs, true,
+        leftHeight, rightHeight, leftVel, rightVel, handsTogether,
+        handsDistance, nowMs, true,
       );
     }
     // Strike phase: same drop judging, plus the flick rule.
@@ -285,10 +368,16 @@ export class SwingMachine {
     ) {
       // Both wrists pulled back overhead after dropping below the line:
       // a flick, not a follow-through.
-      return this.emitWeak('too-small', 'Swing bigger!', nowMs);
+      return this.emitWeak(
+        'too-small',
+        'Follow through!',
+        nowMs,
+        'wound, then pulled back overhead before the strike line',
+      );
     }
     return this.stepDrop(
-      leftHeight, rightHeight, leftVel, rightVel, handsTogether, nowMs, false,
+      leftHeight, rightHeight, leftVel, rightVel, handsTogether,
+      handsDistance, nowMs, false,
     );
   }
 
@@ -297,6 +386,7 @@ export class SwingMachine {
     this.pairPartial = false;
     this.pairPeakLeft = 0;
     this.pairPeakRight = 0;
+    this.pairTopHeight = 0;
     this.droppedBelowWindup = false;
     this.soloSide = null;
     this.soloPeakVel = 0;
@@ -356,6 +446,11 @@ export class SwingMachine {
       this.pairPartial = true;
       this.pairPeakLeft = Math.max(this.pairPeakLeft, leftVel);
       this.pairPeakRight = Math.max(this.pairPeakRight, rightVel);
+      // Highest the pair's LOWER wrist got: the windup that never was.
+      this.pairTopHeight = Math.max(
+        this.pairTopHeight,
+        Math.min(leftHeight, rightHeight),
+      );
       return null;
     }
     if (this.pairPartial) {
@@ -404,7 +499,12 @@ export class SwingMachine {
       if (peak < SWING.strikeVelocityTorsoFracPerSec) {
         return null;
       }
-      return this.emitWeak('hands-apart', 'Both hands together!', nowMs);
+      return this.emitWeak(
+        'hands-apart',
+        'Both hands together!',
+        nowMs,
+        `only the ${side} hand chopped (peak ${peak.toFixed(1)} torso/s)`,
+      );
     }
     if (this.soloDroppedBelowWindup && height >= SWING.windupHeightTorsoFrac) {
       // Pulled back up without crossing: a flick, not a swing.
@@ -425,7 +525,11 @@ export class SwingMachine {
   private judgePartial(nowMs: number): SwingEvent | null {
     const pairPeak = Math.min(this.pairPeakLeft, this.pairPeakRight);
     if (pairPeak < SWING.strikeVelocityTorsoFracPerSec) return null;
-    return this.emitWeak('too-small', 'Swing bigger!', nowMs);
+    const detail =
+      `never wound: highest ${this.pairTopHeight.toFixed(2)} / ` +
+      `windup ${SWING.windupHeightTorsoFrac} torso, ` +
+      `peak ${pairPeak.toFixed(1)} torso/s`;
+    return this.emitWeak('too-small', 'Swing bigger!', nowMs, detail);
   }
 
   /**
@@ -441,6 +545,7 @@ export class SwingMachine {
     leftVel: number,
     rightVel: number,
     handsTogether: boolean,
+    handsDistance: number,
     nowMs: number,
     allowStrikeTransition: boolean,
   ): SwingEvent | null {
@@ -459,7 +564,12 @@ export class SwingMachine {
       leftVel >= SWING.strikeVelocityTorsoFracPerSec ||
       rightVel >= SWING.strikeVelocityTorsoFracPerSec;
     if (!handsTogether && droppingFast) {
-      return this.emitWeak('hands-apart', 'Both hands together!', nowMs);
+      return this.emitWeak(
+        'hands-apart',
+        'Both hands together!',
+        nowMs,
+        `gap ${handsDistance.toFixed(2)} torso, max ${SWING.handsTogetherTorsoFrac}`,
+      );
     }
 
     const strikeLine = -SWING.strikeLineTorsoFrac;
@@ -475,7 +585,15 @@ export class SwingMachine {
       (leftCrossed && rightStillUp) ||
       (rightCrossed && leftStillUp);
     if (crossed) {
-      return this.judgeStrikeCrossing(handsTogether, nowMs);
+      const split = (leftCrossed && rightStillUp) || (rightCrossed && leftStillUp);
+      return this.judgeStrikeCrossing(
+        handsTogether,
+        handsDistance,
+        split
+          ? 'one hand crossed, the other still overhead'
+          : null,
+        nowMs,
+      );
     }
 
     if (
@@ -499,14 +617,27 @@ export class SwingMachine {
    */
   private judgeStrikeCrossing(
     handsTogether: boolean,
+    handsDistance: number,
+    splitDetail: string | null,
     nowMs: number,
   ): SwingEvent | null {
     if (!handsTogether) {
-      return this.emitWeak('hands-apart', 'Both hands together!', nowMs);
+      return this.emitWeak(
+        'hands-apart',
+        'Both hands together!',
+        nowMs,
+        splitDetail ??
+          `gap ${handsDistance.toFixed(2)} torso, max ${SWING.handsTogetherTorsoFrac}`,
+      );
     }
     const pairPeak = Math.min(this.pairPeakLeft, this.pairPeakRight);
     if (pairPeak < SWING.strikeVelocityTorsoFracPerSec) {
-      return this.emitWeak('too-slow', 'Swing faster!', nowMs);
+      return this.emitWeak(
+        'too-slow',
+        'Swing faster!',
+        nowMs,
+        `peak ${pairPeak.toFixed(1)} torso/s, need ${SWING.strikeVelocityTorsoFracPerSec}`,
+      );
     }
     const event: SwingHitEvent = {
       kind: 'hit',
@@ -514,6 +645,7 @@ export class SwingMachine {
       message: 'HIT!',
     };
     this.lastEvent = event;
+    this.lastWeakDetail = null;
     this.phase = 'recover';
     this.recoverUntilMs = nowMs + SWING.cooldownMs;
     this.clearAttempt();
@@ -522,11 +654,17 @@ export class SwingMachine {
 
   private emitWeak(
     reason: WeakReason,
-    message: 'Swing bigger!' | 'Swing faster!' | 'Both hands together!',
+    message:
+      | 'Swing bigger!'
+      | 'Swing faster!'
+      | 'Both hands together!'
+      | 'Follow through!',
     nowMs: number,
+    detail: string,
   ): SwingEvent {
     const event: SwingWeakEvent = { kind: 'weak', reason, message };
     this.lastEvent = event;
+    this.lastWeakDetail = detail;
     this.phase = 'ready';
     this.rearmUntilMs = nowMs + SWING.weakRearmMs;
     this.clearAttempt();

@@ -3,7 +3,7 @@
  * Drawn unmirrored, after the mirrored video/skeleton pass.
  */
 
-import { RENDER } from '../core/config';
+import { FACING, RENDER } from '../core/config';
 import type { BodyState } from '../core/bodyState';
 
 export interface HudReadout {
@@ -40,6 +40,15 @@ export interface HudReadout {
   videoFrozen?: boolean;
   /** Age of the video element's currentTime in ms (null = unknown). */
   videoCurrentTimeAgeMs?: number | null;
+  /**
+   * Measured numbers behind the last weak swing (v3), e.g.
+   * "peak 2.1 torso/s, need 2.5" — the reject reason the "last swing"
+   * line names, with the evidence. Optional: only the Swing Lab game
+   * has one, and the coordinator wires it from the game's snapshot in
+   * main.ts (`game.snapshot().lastWeakDetail`). Undefined/null draws
+   * no line.
+   */
+  swingWeakDetail?: string | null;
 }
 
 /** Truncate a message to `maxChars`, with an ellipsis when cut. */
@@ -102,9 +111,26 @@ export function drawHud(
       `L arm ${body.leftArm.raised ? 'UP' : '--'} ${body.leftArm.extended ? 'ext' : 'bent'} ${body.leftArm.angleDeg.toFixed(0)}°`,
       `R arm ${body.rightArm.raised ? 'UP' : '--'} ${body.rightArm.extended ? 'ext' : 'bent'} ${body.rightArm.angleDeg.toFixed(0)}°`,
       `jump ${body.jumping ? 'YES' : 'no'}  duck ${body.ducking ? 'YES' : 'no'}`,
+      // Facing signal (v3): live shoulder-width ratio vs the hint
+      // threshold, plus the nose-offset second signal when the nose
+      // is visible — the numbers the Nov 4 t30/t66 false positives
+      // were missing.
+      `shoulders ${body.shoulderWidthTorsoFrac.toFixed(2)} (need ${FACING.minShoulderWidthTorsoFrac.toFixed(2)})` +
+        (body.noseOffsetTorsoFrac === null
+          ? '  nose n/a'
+          : `  nose off ${body.noseOffsetTorsoFrac.toFixed(2)} (max ${FACING.maxNoseOffsetTorsoFrac.toFixed(2)})`),
+      // Latched wrist X (v3): these are the continuity-latched
+      // positions the avatar is drawn from, not the raw model labels.
+      // "latch SWAPPED" means the model swapped its left/right wrist
+      // labels and the latch held the physical hands steady.
+      `wrists L ${body.leftWristX.toFixed(2)} R ${body.rightWristX.toFixed(2)}` +
+        `  latch ${body.wristLatchSwapped ? 'SWAPPED' : 'ok'}`,
     );
   } else {
     lines.push('no person detected');
+  }
+  if (readout.swingWeakDetail !== undefined && readout.swingWeakDetail !== null) {
+    lines.push(`last weak: ${truncate(readout.swingWeakDetail, 80)}`);
   }
   if (readout.poseMatchScore !== null) {
     lines.push(`pose match ${(readout.poseMatchScore * 100).toFixed(0)}%`);

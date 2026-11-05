@@ -59,7 +59,7 @@ const GAME_BLURBS: Record<string, string> = {
   'space-invaders':
     '🚀 Move your body to fly the ship. Raise an arm to shoot!',
   'dance-drop': '💃 Copy the falling pose before it lands in your zone!',
-  'swing-lab': '⛏️ Raise both arms overhead, then chop down to mine ore!',
+  'swing-lab': '⛏️ Raise both arms overhead, then chop down to mine Ferrite Shale at The Jag!',
   'auto-runner': '🏃 Switch lanes, jump and duck! Coming soon.',
   lumberjack: '🪓 Chop trees with your body. Coming soon.',
 };
@@ -95,6 +95,7 @@ function main(): void {
   const btnDebug = requireElement('btn-debug', HTMLButtonElement);
   const btnVideo = requireElement('btn-video', HTMLButtonElement);
   const btnRetry = requireElement('btn-retry', HTMLButtonElement);
+  const btnFullscreen = requireElement('btn-fullscreen', HTMLButtonElement);
 
   const sfx = new SoundEffects();
   const tracker = new BodyStateTracker();
@@ -251,6 +252,11 @@ function main(): void {
 
   function quitToHub(): void {
     stopGame();
+    // Leaving the stage while fullscreen would leave the (now hidden)
+    // stage fullscreened: exit first.
+    if (document.fullscreenElement !== null) {
+      void document.exitFullscreen();
+    }
     stageSection.hidden = true;
     hubSection.hidden = false;
     outOfFrame.hidden = true;
@@ -397,6 +403,34 @@ function main(): void {
     sfx.unlock();
     void restartCameraSource();
   });
+  // Fullscreen (Swing Lab v3): the whole stage section — canvas, HUD and
+  // controls — goes fullscreen, so the game fills the screen on a laptop
+  // or a big monitor. The button label follows the real state (the user
+  // can also leave with Esc), via the `fullscreenchange` event. A denied
+  // request (no user gesture, unsupported browser) just stays windowed.
+  function updateFullscreenLabel(): void {
+    btnFullscreen.textContent =
+      document.fullscreenElement !== null
+        ? '⛶ Exit Fullscreen'
+        : '⛶ Fullscreen';
+  }
+  async function toggleFullscreen(): Promise<void> {
+    try {
+      if (document.fullscreenElement !== null) {
+        await document.exitFullscreen();
+      } else {
+        await stageSection.requestFullscreen();
+      }
+    } catch {
+      // Fullscreen unavailable or denied — stay in windowed mode.
+    }
+    updateFullscreenLabel();
+  }
+  btnFullscreen.addEventListener('click', () => {
+    void toggleFullscreen();
+  });
+  document.addEventListener('fullscreenchange', updateFullscreenLabel);
+  updateFullscreenLabel();
   if (sfx.isMuted) btnMute.textContent = '🔇 Sound Off';
 
   // -------------------------------------------------------------- input ---
@@ -457,6 +491,7 @@ function main(): void {
     if (key === 's' && activeSource === mouse) mouse.setDucking(true);
     if (key === 'm') btnMute.click();
     if (key === 'v') btnVideo.click();
+    if (key === 'f') btnFullscreen.click();
     if (key === 'd' && activeSource !== mouse) {
       // 'd' is the right-arm key for the sim; outside the sim it toggles debug.
       btnDebug.click();
@@ -626,6 +661,10 @@ function main(): void {
           readout.delegate = mediaPipe.delegateInUse;
           readout.videoFrozen = mediaPipe.videoFrozen;
           readout.videoCurrentTimeAgeMs = mediaPipe.videoCurrentTimeAgeMs;
+        }
+        // Weak-swing detail comes from the active game, not the tracker.
+        if (activeGame instanceof SwingLabGame) {
+          readout.swingWeakDetail = activeGame.snapshot().lastWeakDetail;
         }
         drawHud(context, readout);
       }

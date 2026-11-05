@@ -202,3 +202,27 @@ body {
   border-radius: 4px;
   padding: 1px 6px;
 }
+
+/* Swing Lab v3 fill-screen sizing. The stage stays 16:9 letterboxed,
+   never stretched: it grows to the available window (width and viewport
+   height both cap it), and in fullscreen the whole stage section fills
+   the screen the same way. The portrait-phone letterboxing is untouched
+   — the canvas backing store is still fixed landscape. */
+main#app {
+  max-width: min(1280px, 100%);
+}
+#stage-section .stage-wrap {
+  width: min(100%, calc((100dvh - 300px) * 16 / 9));
+  margin-inline: auto;
+}
+#stage-section:fullscreen:not([hidden]) {
+  background: #000;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+#stage-section:fullscreen .stage-wrap {
+  width: min(100%, calc((100dvh - 240px) * 16 / 9));
+}

@@ -23,7 +23,7 @@ jump, `S` duck. `?source=replay` plays a recorded clip instead.
 
 ## The games
 
-- **Swing Lab** — Active RuneSpace Mining prototype. Raise both arms overhead, then chop down fast like a pickaxe: the ore node cracks, +1 ore, +10 Mining XP. Five hits break the node and a new one spawns. Single-arm swings count too. Half-swings say "Swing bigger!" / "Swing faster!" instead of hitting.
+- **Swing Lab** — Active RuneSpace Mining prototype. Raise both arms overhead together, then chop down fast like a pickaxe: the Ferrite Shale node cracks, a real ore pops out and flies to the Ore counter, +15 Mining XP. Five hits break the node apart into falling pieces; a new node arrives after a 3 s progress bar and fades in. Two-handed only — a single arm gets "Both hands together!". Mine tiers follow RuneSpace: Ferrite Shale at The Jag (Mining 1, 15 XP/hit) now, Galvanite at Deep Jag (Mining 5, 25 XP/hit) locked until Mining 5 — pick a mine on the chips at the bottom-right of the stage.
 - **Space Invaders** — move your body to fly the ship. Raise either arm to shoot a missile in the direction your arm points (straight up only if your arm is straight up). Lower your arm to reload. Enemies shoot back slowly; each level gets a little faster.
 - **Dance Pose Drop** — a stickman in a pose falls from the sky. Copy the pose when it lands in your zone. Perfect / Good / Miss.
 - **Auto Runner** — coming soon (lane switching, jump, duck).
@@ -33,7 +33,7 @@ jump, `S` duck. `?source=replay` plays a recorded clip instead.
 
 Open the Pages link, tap **Turn Camera On**, stand back so head-to-knees fit in frame, and wait for the green **"✅ Body found"** indicator — the game will not start until it can see your body, and it pauses itself if you step out of frame.
 
-**You won't see yourself on screen** — you see the game and your skeleton only. The camera video is hidden by default; the **"📷 Show Camera"** button (or `V`) shows it letterboxed for calibration. The game stage is a fixed 16:9 landscape frame whatever shape your phone's camera is, so the video never stretches.
+**You won't see yourself on screen** — you see the game and your miner (white tank top, heart boxers, hard hat) only. The camera video is hidden by default; the **"📷 Show Camera"** button (or `V`) shows it letterboxed for calibration. The game stage is a fixed 16:9 landscape frame whatever shape your phone's camera is, so the video never stretches. On desktop the stage fills the browser window, and the **"⛶ Fullscreen"** button (or `F`) puts the whole stage fullscreen.
 
 If the game says **"Pose model failed to load"**, the pose model didn't download — check your connection and reload. The debug HUD (`🔍 Debug` / `D`) shows model status, inference Hz, and body visibility, so a bad playtest can be told apart: model didn't load vs body not seen vs game logic wrong.
 
@@ -58,7 +58,7 @@ What changed in this round:
 
 Still untested on a real device: whether inference actually keeps running on the Pixel during a full Swing Lab session — the duplicate-timestamp guard is the prime suspect for the freeze but is verified in code + fakes only, not on the device — what the real inference Hz and delegate are in play, whether the 2 s staleness threshold ever trips on a healthy feed, and the swing thresholds (0.6 windup, 3.0 torso/s) against a real chop.
 
-Mouse-sim (no camera): `?source=mouse`, hold **A+D** (or both mouse buttons) ~0.5s to wind up, release both at once to strike. Single arm works too (just A).
+Mouse-sim (no camera): `?source=mouse`, hold **A+D** (or both mouse buttons) ~0.5s to wind up, release both at once to strike. Both hands together — a single arm gets "Both hands together!" and does not count.
 
 ## How it works
 
@@ -157,3 +157,21 @@ releasing the latch at the bottom would snap the smoothed wrists apart
 and trip `hands-apart` before the hit lands). Single-arm and angled
 (Q/E) raises still follow their own arcs. Between chops the hands rest
 together at waist height, not at the sides.
+
+## Swing Lab v3 — RuneSpace node, tiers, ore drops, break lifecycle, fullscreen (Worker B, Nov 4, 2026)
+
+Second playtest (Brandon, Nov 4, ~4:30 PM, laptop, 77 s video): Lv 5, 43 swings, 43 ore. What he asked for: the node bigger, wider and lower (cover the legs more, not more upper body); the node looking like a real RuneSpace ore node; the real RuneSpace mining tiers for which mines you can choose; a fullscreen mode, or at least the canvas filling the screen; ore coming out of the node on a hit — the actual ore image from RuneSpace, starting at the level 1 ore. The same round added: bigger hit effects, and the node falling apart into pieces on break instead of popping out of existence.
+
+**Node — bigger, wider, lower, RuneSpace look.** The node is an ellipse now (`nodeRadiiForStage`: rx 0.22, ry 0.17 of the smaller stage dimension; v2 was a 0.15 circle), and its top sits just below the hips instead of half a radius above them (`nodeCenterForBody`: centre 1.15 radii below the hips) — wider and lower, covering the legs more without covering more upper body. The rock face is the real RuneSpace `boulder.webp` (copied into `public/item-art/`, cover-fit into the ellipse), with the active tier's ore crystals drawn embedded in it (rusty orange for Ferrite Shale, bright silver for Galvanite, sampled from the real art) and a drawn-rock fallback when the art has not loaded. The plain brown circle + blue diamond is gone. Cracks + HP pips stay; cracks get thicker and the rock darkens as the hits pile up so the stages read clearly.
+
+**RuneSpace mining tiers (`src/games/swing-lab/tiers.ts`).** Sourced from the RuneSpace repo (`game/config/balance.ts`, main ba93790, mining `sources`): Ferrite Shale — The Jag, `requiredMiningLevel` 1, `successXp` 15; Galvanite — Deep Jag, `requiredMiningLevel` 5, `successXp` 25. The level curve stays Swing Lab's own (100 XP per level, `SWING.xpPerLevel`). Ferrite Shale is the only playable node now; the mine selector is two chips at the bottom-right of the stage (canvas-drawn, tappable via the game's own canvas pointer listener — `pointerDownAt`), showing Galvanite locked with its requirement ("🔒 Galvanite — Deep Jag (Lv 5)"; tapping it shows the full "Unlocks at Mining 5 — Deep Jag" floater). Adding the next tier is a data-only change: append one entry to `MINING_TIERS` and the selector, lock, drops and XP all follow. XP per hit is the tier's RuneSpace `successXp` (15 / 25), wired at the scoring layer in `swingLab.ts` — the swing machine's API is untouched.
+
+**Ore drops use the real RuneSpace ore image.** Every hit pops one ore out of the node: the actual `ferrite-shale.webp` (or `galvanite.webp` for that tier), arcing up out of the rock and flying down to the Ore counter in the HUD over 800 ms, shrinking and fading. The Ore counter shows the same real ore image next to the count. Art is preloaded once in the game constructor via `assetUrl` (base-relative, never a leading slash — the Nov 4 path bug); a missing or failed image falls back to the drawn gem, never a broken image or a crash.
+
+**Hit + break effects.** A hit now shakes harder (250 ms, 12 px — v2 was 150 ms / 5 px), flashes the meter, and throws 8 debris chips off the rock. On the 5th hit the node breaks apart into 6 rock pieces that tumble and fall with gravity off the bottom of the canvas and are disposed of once off-screen or past their 1.2 s lifetime (hard-capped at 24 pieces, so many broken nodes can never accumulate a list). Then a progress bar fills over 3 s where the node broke ("⛏️ New node in Ns…"); the node is gone and unminable during the wait — swings in the wait count for nothing. When the bar completes, the new node fades in over 400 ms. All break timings live in the `BREAK` module constants in `swingLab.ts`, not `config.ts` (Worker B could not touch `config.ts` this round; the coordinator can move them into `SWING` at integration).
+
+**Fullscreen + fill the screen.** A **"⛶ Fullscreen"** button in the stage controls (or `F`) puts the whole stage section — canvas, HUD, controls — fullscreen via the Fullscreen API; the label follows the real state through `fullscreenchange` (Esc works too), a denied request just stays windowed, and quitting to the hub exits fullscreen first. The stage also fills the browser window without fullscreen: `#app` is wider now (1280 px) and the stage wrap is capped by viewport height as well as width, so on desktop it is big by default instead of a small box under the hub. The 16:9 letterbox inside the stage is unchanged, and the portrait-phone letterboxing is untouched. The fill-screen CSS lives in a `<style>` block in `index.html`, not `styles.css` (outside Worker B's file ownership this round — the coordinator can move it at integration).
+
+**Copy fix.** The hub tip said "you'll see your skeleton" — v2 shipped a person, so it now says "you'll see your miner in a hard hat". The Swing Lab hub card names the mine: "mine Ferrite Shale at The Jag!".
+
+**Still unverified (needs a real device).** The node's look on a real phone screen (boulder art + crystals at phone size), fullscreen on a real browser, image loading under the Pages subpath (`./item-art/...` — correct by construction via `assetUrl`, never exercised against the live subpath), and whether the bigger shake / debris / pieces read well or overwhelm a small screen.

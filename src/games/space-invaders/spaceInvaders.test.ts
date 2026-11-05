@@ -92,6 +92,8 @@ function makeBody(
     torsoY: 0.5,
     torsoLength: 0.3,
     shoulderWidthTorsoFrac: 0.22 / 0.3,
+    noseOffsetTorsoFrac: 0,
+    wristLatchSwapped: false,
     visibilityScore: 1,
     leftArm: left,
     rightArm: right,

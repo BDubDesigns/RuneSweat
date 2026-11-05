@@ -2,19 +2,28 @@
  * Swing Lab — Active RuneSpace Mining prototype (Slice 1).
  *
  * One ore node on screen, one mechanic: a pickaxe swing is a hit. The
- * miner is the player's own live skeleton (drawn by the hub) plus a
+ * miner is the player's own live avatar (drawn by the hub) plus a
  * pickaxe anchored at the wrists. Raise both arms overhead (windup),
- * chop down fast through chest level (strike) — the node cracks, +1 ore,
- * +Mining XP. Five hits break the node and a new one spawns.
+ * chop down fast through waist level (strike) — the node cracks, an ore
+ * pops out, +Mining XP. Five hits break the node and a new one spawns.
+ *
+ * v3 (Nov 4, 2026, second playtest): the node is a real RuneSpace ore
+ * node — the copied `boulder.webp` rock with the active tier's ore
+ * crystals embedded — and the mines follow RuneSpace's own tiers
+ * (`tiers.ts`, sourced from RuneSpace `game/config/balance.ts`): Ferrite
+ * Shale at The Jag (Mining 1, 15 XP/hit) now, Galvanite at Deep Jag
+ * (Mining 5, 25 XP/hit) locked until Mining 5. Every hit drops the real
+ * ore image, which flies toward the Ore counter.
  *
  * The game owns only its simulation + canvas drawing + HUD string. It
  * never touches landmarks for gameplay: the swing is decided by
  * `SwingMachine` from `BodyState` only. All tuning lives in `SWING`
- * (`core/config.ts`).
+ * (`core/config.ts`); tier values live in `tiers.ts`.
  */
 
 import { RENDER, STAGE, SWING } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
+import { assetUrl } from '../../core/assetUrl';
 import type { BodyState } from '../../core/bodyState';
 import { clamp, toCanvas } from '../../render/stage';
 import type { NormalizedLandmark } from '../../tracking/poseTypes';
@@ -26,6 +35,14 @@ import {
   type SwingPhase,
   type SwingSnapshot,
 } from './swingMachine';
+import {
+  DEFAULT_TIER_ID,
+  MINING_TIERS,
+  tierById,
+  tierLockMessage,
+  tierUnlocked,
+  type MiningTier,
+} from './tiers';
 
 /** Mining level for total XP: 100 XP per level, starting at level 1. */
 export function miningLevel(xp: number): number {
@@ -43,29 +60,84 @@ export function cracksForHits(hits: number): number {
 }
 
 /**
+ * Start loading one art file (base-relative via `assetUrl`, never a
+ * leading slash — see `core/assetUrl.ts`). Returns `null` where the
+ * environment has no `Image` (node tests): callers treat that as "not
+ * loaded" and draw the fallback. A failed load also stays not-loaded.
+ */
+function loadImage(relativePath: string): LoadedImage | null {
+  if (typeof Image === 'undefined') return null;
+  const img = new Image();
+  const entry: LoadedImage = { img, loaded: false };
+  img.onload = () => {
+    entry.loaded = true;
+  };
+  img.onerror = () => {
+    entry.loaded = false;
+  };
+  img.src = assetUrl(relativePath);
+  return entry;
+}
+
+/** The tier with this id, or the first tier if it is missing (never undefined). */
+function requireTier(tierId: string): MiningTier {
+  const tier = tierById(tierId);
+  if (tier !== undefined) return tier;
+  const first = MINING_TIERS[0];
+  if (first === undefined) {
+    throw new Error('swing-lab: MINING_TIERS is empty');
+  }
+  return first;
+}
+
+/**
+ * Node radii for a stage: the v3 node is bigger and wider than v2's
+ * circle (v2: radius 0.15 * min(w, h) both ways, so 0.30 wide and tall).
+ * v3 is an ellipse 0.44 wide x 0.34 tall (fractions of min(w, h)) — the
+ * rock reads as a boulder, not a ball.
+ */
+export function nodeRadiiForStage(
+  width: number,
+  height: number,
+): { rx: number; ry: number } {
+  const m = Math.min(width, height);
+  return { rx: m * 0.22, ry: m * 0.17 };
+}
+
+/** Front-center node geometry: centre + radii, canvas space. */
+export interface NodeGeometry {
+  x: number;
+  y: number;
+  rx: number;
+  ry: number;
+}
+
+/**
  * Front-center node position, derived from the body's canvas hip
  * position (Nov 4, 2026 playtest redesign): the node sits directly in
  * front of the avatar at chair/waist height, so the rock you chop
  * occludes the avatar's waist and below. `x` is the hip-centre canvas
- * x; `y` puts the top of the rock around waist height (the centre sits
- * half a radius below the hips). No body: centred on the stage, waiting
- * for a miner.
+ * x; the TOP of the rock sits just below the hips (v3: the centre is
+ * 1.15 radii below the hips, so the top is 0.15 radii below them — the
+ * rock covers the legs more than v2 did without covering more upper
+ * body; v2's top sat half a radius ABOVE the hips). No body: centred
+ * on the stage, waiting for a miner.
  */
 export function nodeCenterForBody(
   body: BodyState | null,
   width: number,
   height: number,
-): { x: number; y: number } {
-  const r = Math.min(width, height) * 0.15;
+): NodeGeometry {
+  const { rx, ry } = nodeRadiiForStage(width, height);
   if (body === null || !body.present) {
-    return { x: width / 2, y: height * 0.62 };
+    return { x: width / 2, y: height * 0.62, rx, ry };
   }
   const hip = toCanvas(
     { x: body.torsoX, y: body.torsoY, visibility: 1 },
     width,
     height,
   );
-  return { x: hip.x, y: hip.y + r * 0.5 };
+  return { x: hip.x, y: hip.y + ry * 1.15, rx, ry };
 }
 
 /**
@@ -102,6 +174,25 @@ interface Particle {
   vy: number;
   untilMs: number;
   color: string;
+  /** Draw radius in px (4 = sparkle, 5-9 = debris chip). */
+  size: number;
+}
+
+/**
+ * One chunk of a broken node: it arcs out of the rock, tumbles, falls
+ * with gravity off the bottom of the canvas, and is disposed of once
+ * off-screen or past its lifetime — never left accumulating.
+ */
+interface NodePiece {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  rot: number;
+  rotV: number;
+  size: number;
+  untilMs: number;
+  color: string;
 }
 
 interface Floater {
@@ -109,6 +200,53 @@ interface Floater {
   y: number;
   text: string;
   untilMs: number;
+}
+
+/**
+ * One ore popping out of the node on a hit: it arcs out of the rock and
+ * flies toward the Ore counter in the HUD (bottom-left of the stage),
+ * shrinking and fading as it goes. `tierId` is the tier it came from, so
+ * the drop draws that tier's real ore image.
+ */
+export interface OreDrop {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  startMs: number;
+  durationMs: number;
+  tierId: string;
+}
+
+/** How long one ore drop flies, in ms. */
+export const ORE_DROP_MS = 800;
+
+/**
+ * Node break lifecycle (v3). Values live in `SWING` in `config.ts` (the
+ * SSOT); this object just renames them for the game code.
+ */
+export const BREAK = {
+  /** Respawn wait after a break: the progress bar fills over this long. */
+  respawnMs: SWING.breakRespawnMs,
+  /** The new node fades in over this long once the wait completes. */
+  fadeInMs: SWING.breakFadeInMs,
+  /** Rock pieces fly for this long before they are disposed of. */
+  pieceLifetimeMs: SWING.breakPieceLifetimeMs,
+  /** Pieces one broken node splits into. */
+  pieceCount: SWING.breakPieceCount,
+  /** Debris chips thrown off by every counted hit. */
+  debrisPerHit: SWING.breakDebrisPerHit,
+  /** Debris chips live this long (ms). */
+  debrisLifetimeMs: SWING.breakDebrisLifetimeMs,
+  /** Hit shake: harder than v2's 150 ms / 5 px, so a hit feels like a hit. */
+  shakeMs: SWING.breakShakeMs,
+  shakePx: SWING.breakShakePx,
+} as const;
+
+/** Preloaded art, or `null` where the browser has no `Image` (tests). */
+interface LoadedImage {
+  img: HTMLImageElement;
+  loaded: boolean;
 }
 
 /** Read-only snapshot of the live state, for the debug HUD and tests. */
@@ -125,6 +263,20 @@ export interface SwingLabSnapshot {
   lastEvent: SwingEvent | null;
   lastHandedness: SwingHandedness | null;
   particles: number;
+  /** The mine being worked right now (`tiers.ts` id). */
+  tierId: string;
+  /** Display name of the active tier (`'Ferrite Shale'`). */
+  tierName: string;
+  /** Weak-swing detail from the machine (measured reject reason), or null after a hit. */
+  lastWeakDetail: string | null;
+  /** Ore drops currently flying toward the Ore counter. */
+  oreDrops: number;
+  /** True while the node is gone between break and respawn. */
+  nodeGone: boolean;
+  /** Respawn progress 0..1 (1 = node present). */
+  respawnProgress: number;
+  /** Rock pieces currently falling from a broken node. */
+  nodePieces: number;
 }
 
 const PHASE_LINES: Record<SwingPhase, string> = {
@@ -167,9 +319,91 @@ export class SwingLabGame implements Game {
   private lastBody: BodyState | null = null;
   private particles: Particle[] = [];
   private floaters: Floater[] = [];
+  /** Ore drops currently flying from the node to the Ore counter. */
+  private oreDrops: OreDrop[] = [];
+  /** Rock chunks of a broken node, still falling (disposed off-screen). */
+  private nodePieces: NodePiece[] = [];
+  /**
+   * ms the node broke at (0 = never / node present). The node is gone
+   * until `breakAtMs + BREAK.respawnMs`, then fades back in.
+   */
+  private breakAtMs = 0;
+  /**
+   * Where the node broke (canvas space): pieces fall from here and the
+   * respawn bar sits here, even if the player moves mid-wait.
+   */
+  private breakPos: { x: number; y: number } | null = null;
+  /** Latest clock reading, so `snapshot()` can report gone/progress. */
+  private lastNowMs = 0;
+  /** Current screen-shake amplitude in px (bigger right after a hit). */
+  private shakeAmpPx = SWING.shakePx * 2;
+  /** The mine being worked; Ferrite Shale until the player picks another. */
+  private activeTier: MiningTier = requireTier(DEFAULT_TIER_ID);
+  /**
+   * The mine-selector chips drawn on the canvas (bottom-right), with
+   * their canvas-space hit rects, recomputed every render. `pointerDownAt`
+   * reads these, so a tap on a chip switches mines.
+   */
+  private chipRects: { x: number; y: number; w: number; h: number; tierId: string }[] =
+    [];
+  /** True once the canvas pointer listener is attached (render attaches it). */
+  private pointerListenerAttached = false;
+  /** The canvas the game is currently rendering into, for pointer math. */
+  private lastCanvas: HTMLCanvasElement | null = null;
+  /**
+   * RuneSpace art, preloaded once: the boulder rock face + one ore image
+   * per tier. A missing/failed image leaves `loaded` false and the game
+   * draws the fallback instead — never a broken image, never a crash.
+   * `null` in environments without `Image` (node tests): everything
+   * falls back to drawn shapes there.
+   */
+  private readonly boulderImage: LoadedImage | null;
+  private readonly oreImages = new Map<string, LoadedImage>();
 
   public constructor(sfx: SoundEffects) {
     this.sfx = sfx;
+    this.boulderImage = loadImage('item-art/boulder.webp');
+    for (const tier of MINING_TIERS) {
+      const image = loadImage(tier.oreImage);
+      if (image !== null) this.oreImages.set(tier.id, image);
+    }
+  }
+
+  /**
+   * Switch mines. A locked tier (level too low) stays put and shows its
+   * lock message as a floater instead; switching to a new mine starts a
+   * fresh node (cracks reset). Returns false when nothing changed.
+   */
+  public selectTier(tierId: string, nowMs: number): boolean {
+    const tier = tierById(tierId);
+    if (tier === undefined) return false;
+    if (!tierUnlocked(tier, miningLevel(this.xp))) {
+      this.floaters.push({
+        x: this.lastWidth / 2,
+        y: this.lastHeight * 0.3,
+        text: `🔒 ${tierLockMessage(tier)}`,
+        untilMs: nowMs + SWING.floaterMs,
+      });
+      return false;
+    }
+    if (tier.id === this.activeTier.id) return true;
+    this.activeTier = tier;
+    this.nodeHits = 0;
+    return true;
+  }
+
+  /**
+   * Canvas-space pointer tap (the canvas listener converts client
+   * coordinates and calls this). A tap on a mine-selector chip switches
+   * mines; anywhere else does nothing.
+   */
+  public pointerDownAt(x: number, y: number, nowMs: number): boolean {
+    for (const chip of this.chipRects) {
+      if (x >= chip.x && x <= chip.x + chip.w && y >= chip.y && y <= chip.y + chip.h) {
+        return this.selectTier(chip.tierId, nowMs);
+      }
+    }
+    return false;
   }
 
   public start(): void {
@@ -179,6 +413,14 @@ export class SwingLabGame implements Game {
 
   public stop(): void {
     this.paused = true;
+    if (
+      this.lastCanvas !== null &&
+      this.pointerListenerAttached &&
+      typeof this.lastCanvas.removeEventListener === 'function'
+    ) {
+      this.lastCanvas.removeEventListener('pointerdown', this.handlePointerDown);
+      this.pointerListenerAttached = false;
+    }
   }
 
   public pause(): void {
@@ -203,6 +445,7 @@ export class SwingLabGame implements Game {
     if (this.paused) return;
     const dtSec = dtMs / 1000;
     this.lastBody = body;
+    this.lastNowMs = nowMs;
 
     const event = this.machine.update(body, nowMs);
     const phase = this.machine.currentPhase;
@@ -214,7 +457,19 @@ export class SwingLabGame implements Game {
 
     if (event !== null) this.applyEvent(event, nowMs);
     this.updateParticles(dtSec, nowMs);
+    this.updatePieces(dtSec, nowMs);
+    this.oreDrops = this.oreDrops.filter(
+      (drop) => nowMs < drop.startMs + drop.durationMs,
+    );
     this.floaters = this.floaters.filter((f) => nowMs < f.untilMs);
+    // The wait + fade-in are done: forget the break, the node is back.
+    if (
+      this.breakAtMs !== 0 &&
+      nowMs >= this.breakAtMs + BREAK.respawnMs + BREAK.fadeInMs
+    ) {
+      this.breakAtMs = 0;
+      this.breakPos = null;
+    }
   }
 
   public render(
@@ -228,35 +483,84 @@ export class SwingLabGame implements Game {
     this.lastWidth = width;
     this.lastHeight = height;
     this.lastBody = body;
+    this.lastNowMs = nowMs;
+    this.attachPointerListener(ctx.canvas);
     const snap = this.lastSnapshot ?? this.machine.snapshot();
+    const gone = this.nodeGone(nowMs);
 
     ctx.save();
     if (nowMs < this.shakeUntilMs) {
-      // SWING.shakePx is the tuned base; doubled at render so a hit
+      // A hit shakes harder than v2 (BREAK.shakePx, 250 ms): the shake
       // reads on a phone screen instead of shivering by a pixel or two.
-      const m = SWING.shakePx * 2;
+      const m = this.shakeAmpPx;
       ctx.translate((Math.random() * 2 - 1) * m, (Math.random() * 2 - 1) * m);
     }
 
-    this.drawNode(ctx);
+    if (!gone) {
+      // The respawned node fades in from transparent over BREAK.fadeInMs.
+      ctx.save();
+      ctx.globalAlpha = this.nodeFadeAlpha(nowMs);
+      this.drawNode(ctx);
+      ctx.restore();
+    }
     this.drawParticles(ctx);
+    this.drawNodePieces(ctx, nowMs);
+    this.drawOreDrops(ctx, nowMs);
     this.drawPickaxe(ctx, body, width, height);
     this.drawSwingMeter(ctx, snap, nowMs);
+    this.drawTierChips(ctx, width, height);
     this.drawPhaseText(ctx, snap, width, body);
     if (snap.phase === 'ready' && this.swings === 0) {
       this.drawGhostArc(ctx, width, height);
     }
     this.drawFloaters(ctx, nowMs);
     this.drawBanners(ctx, nowMs, width, height);
+    if (gone) this.drawRespawnBar(ctx, nowMs);
     ctx.restore();
   }
+
+  /**
+   * The canvas pointer listener, attached once from render (the game has
+   * no canvas reference before the first frame). Taps on the mine-selector
+   * chips switch mines; everything else is ignored. Guarded for stub
+   * contexts in tests, which have no `addEventListener`.
+   */
+  private attachPointerListener(canvas: HTMLCanvasElement): void {
+    if (this.pointerListenerAttached) return;
+    this.lastCanvas = canvas;
+    if (typeof canvas.addEventListener !== 'function') return;
+    canvas.addEventListener('pointerdown', this.handlePointerDown);
+    this.pointerListenerAttached = true;
+  }
+
+  /** Canvas `pointerdown` -> canvas-space coords -> `pointerDownAt`. */
+  private readonly handlePointerDown = (event: PointerEvent): void => {
+    const canvas = this.lastCanvas;
+    if (canvas === null) return;
+    const rect =
+      typeof canvas.getBoundingClientRect === 'function'
+        ? canvas.getBoundingClientRect()
+        : null;
+    if (rect === null || rect.width <= 0 || rect.height <= 0) return;
+    const x = ((event.clientX - rect.left) * canvas.width) / rect.width;
+    const y = ((event.clientY - rect.top) * canvas.height) / rect.height;
+    this.pointerDownAt(x, y, event.timeStamp);
+  };
 
   public hudHtml(): string {
     const snap = this.lastSnapshot ?? this.machine.snapshot();
     const level = miningLevel(this.xp);
+    const tier = this.activeTier;
+    // The Ore counter shows the real ore image next to the count (same
+    // art as the drops). The browser caches it, so re-setting innerHTML
+    // each frame does not re-fetch; a missing image degrades to the
+    // tier name text, never a broken-image icon in the count itself.
+    const oreImg =
+      `<img src="${assetUrl(tier.oreImage)}" alt="${tier.name}" ` +
+      `style="height:1.3em;vertical-align:-0.25em">`;
     return (
       `<span>⛏️ Mining Lv ${level} — ${xpIntoLevel(this.xp)}/${SWING.xpPerLevel} XP</span> &nbsp; ` +
-      `<span>🪨 Ore ${this.ore}</span> &nbsp; ` +
+      `<span>${oreImg} Ore ${this.ore} · ${tier.name}</span> &nbsp; ` +
       `<span>Swings ${this.swings}</span> &nbsp; ` +
       `<span>Node ${this.nodeHits}/${SWING.hitsPerNode}</span> &nbsp; ` +
       `<span>Phase: ${snap.phase} · L ${snap.leftVel.toFixed(1)} R ${snap.rightVel.toFixed(1)} torso/s</span>`
@@ -279,6 +583,13 @@ export class SwingLabGame implements Game {
       lastEvent: snap.lastEvent,
       lastHandedness: this.lastHandedness,
       particles: this.particles.length,
+      tierId: this.activeTier.id,
+      tierName: this.activeTier.name,
+      lastWeakDetail: snap.lastWeakDetail,
+      oreDrops: this.oreDrops.length,
+      nodeGone: this.nodeGone(this.lastNowMs),
+      respawnProgress: this.respawnProgress(this.lastNowMs),
+      nodePieces: this.nodePieces.length,
     };
   }
 
@@ -299,28 +610,44 @@ export class SwingLabGame implements Game {
     this.levelBannerUntilMs = 0;
     this.particles = [];
     this.floaters = [];
+    this.oreDrops = [];
+    this.nodePieces = [];
+    this.breakAtMs = 0;
+    this.breakPos = null;
+    this.shakeAmpPx = SWING.shakePx * 2;
+    // A fresh game starts at Mining 1, so it starts on the level 1 mine:
+    // Galvanite would be locked at this level anyway.
+    this.activeTier = requireTier(DEFAULT_TIER_ID);
   }
 
   private applyEvent(event: SwingEvent, nowMs: number): void {
+    // While the node is gone (break -> respawn wait) there is nothing to
+    // hit: swings in the wait count for nothing, not even a weak tick.
+    if (this.nodeGone(nowMs)) return;
     if (event.kind === 'weak') {
       this.sfx.weakTick();
       return;
     }
-    // Counted hit: ore + XP + a crack on the node.
+    // Counted hit: ore + tier XP + a crack on the node + an ore drop.
     this.swings += 1;
-    this.ore += SWING.orePerHit;
+    this.ore += this.activeTier.orePerHit;
     const prevLevel = miningLevel(this.xp);
-    this.xp += SWING.xpPerHit;
+    this.xp += this.activeTier.xpPerHit;
     this.nodeHits += 1;
     this.lastHandedness = event.handedness;
     this.sfx.crack();
-    this.shakeUntilMs = nowMs + SWING.shakeMs;
+    // Harder hit feedback (v3): a bigger, longer shake plus debris
+    // chips flying off the rock.
+    this.shakeUntilMs = nowMs + BREAK.shakeMs;
+    this.shakeAmpPx = BREAK.shakePx;
     this.flashUntilMs = nowMs + 200;
+    this.spawnDebris(nowMs);
+    this.spawnOreDrop(nowMs);
     const { x, y } = this.nodeCenter();
     this.floaters.push({
       x,
       y: y - 95,
-      text: `+${SWING.xpPerHit} XP`,
+      text: `+${this.activeTier.xpPerHit} XP`,
       untilMs: nowMs + SWING.floaterMs,
     });
     if (miningLevel(this.xp) > prevLevel) {
@@ -331,16 +658,106 @@ export class SwingLabGame implements Game {
       this.nodeHits = 0;
       this.sfx.win();
       this.breakBannerUntilMs = nowMs + SWING.breakBannerMs;
+      this.breakNode(nowMs);
       this.spawnBreakParticles(nowMs);
     }
   }
 
-  private nodeCenter(): { x: number; y: number } {
+  /**
+   * The node breaks apart: it splits into rock pieces that tumble and
+   * fall off the bottom of the canvas, and the 3 s respawn wait starts.
+   * The node is gone (no mining) until the wait completes.
+   */
+  private breakNode(nowMs: number): void {
+    const { x, y, rx, ry } = this.nodeCenter();
+    this.breakAtMs = nowMs;
+    this.breakPos = { x, y };
+    const colors = ['#8d7d6b', '#5d5145', '#6b5d4f', this.activeTier.crystalColor];
+    for (let i = 0; i < BREAK.pieceCount; i += 1) {
+      // Mostly upward/outward, then gravity takes them down off-screen.
+      const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.2;
+      const speed = 120 + Math.random() * 220;
+      this.nodePieces.push({
+        x: x + (Math.random() - 0.5) * rx,
+        y: y + (Math.random() - 0.5) * ry,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 80,
+        rot: Math.random() * Math.PI * 2,
+        rotV: (Math.random() - 0.5) * 10,
+        size: 18 + Math.random() * 26,
+        untilMs: nowMs + BREAK.pieceLifetimeMs,
+        color: colors[i % colors.length] ?? '#8d7d6b',
+      });
+    }
+  }
+
+  /** Debris chips thrown off the rock by every counted hit. */
+  private spawnDebris(nowMs: number): void {
+    const { x, y } = this.nodeCenter();
+    const colors = [
+      '#8d7d6b',
+      '#5d5145',
+      this.activeTier.crystalColor,
+      '#ffd166',
+    ];
+    for (let i = 0; i < BREAK.debrisPerHit; i += 1) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 90 + Math.random() * 200;
+      this.particles.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 120,
+        untilMs: nowMs + BREAK.debrisLifetimeMs + Math.random() * 200,
+        color: colors[i % colors.length] ?? '#8d7d6b',
+        size: 5 + Math.random() * 4,
+      });
+    }
+  }
+
+  private nodeCenter(): NodeGeometry {
     return nodeCenterForBody(this.lastBody, this.lastWidth, this.lastHeight);
   }
 
-  private nodeRadius(): number {
-    return Math.min(this.lastWidth, this.lastHeight) * 0.15;
+  /** True while the node is gone between break and respawn. */
+  private nodeGone(nowMs: number): boolean {
+    return this.breakAtMs !== 0 && nowMs < this.breakAtMs + BREAK.respawnMs;
+  }
+
+  /** Respawn progress 0..1 (1 = node present). */
+  private respawnProgress(nowMs: number): number {
+    if (this.breakAtMs === 0) return 1;
+    return clamp((nowMs - this.breakAtMs) / BREAK.respawnMs, 0, 1);
+  }
+
+  /**
+   * Fade-in alpha for the respawned node: 0 while gone, ramping 0..1
+   * over `BREAK.fadeInMs` once the wait completes, 1 after.
+   */
+  private nodeFadeAlpha(nowMs: number): number {
+    if (this.breakAtMs === 0) return 1;
+    const sinceRespawn = nowMs - (this.breakAtMs + BREAK.respawnMs);
+    if (sinceRespawn < 0) return 0;
+    return clamp(sinceRespawn / BREAK.fadeInMs, 0, 1);
+  }
+
+  /**
+   * One ore pops out of the node on a hit and flies toward the Ore
+   * counter in the HUD, which sits below the stage — so the drop arcs up
+   * out of the rock first, then down to the bottom-left of the stage,
+   * shrinking and fading as it goes.
+   */
+  private spawnOreDrop(nowMs: number): void {
+    const { x, y } = this.nodeCenter();
+    this.oreDrops.push({
+      fromX: x,
+      fromY: y,
+      toX: this.lastWidth * 0.12,
+      toY: this.lastHeight - 14,
+      startMs: nowMs,
+      durationMs: ORE_DROP_MS,
+      tierId: this.activeTier.id,
+    });
   }
 
   private spawnBreakParticles(nowMs: number): void {
@@ -357,6 +774,7 @@ export class SwingLabGame implements Game {
         vy: Math.sin(angle) * speed - 60,
         untilMs: nowMs + 500 + Math.random() * 300,
         color,
+        size: 4,
       });
     }
   }
@@ -373,43 +791,115 @@ export class SwingLabGame implements Game {
     this.particles = remaining;
   }
 
+  /**
+   * Rock pieces fall with gravity and are disposed of the moment they
+   * leave the bottom of the canvas (or their lifetime ends). The list is
+   * also hard-capped, so a pathological run can never accumulate pieces
+   * across many broken nodes.
+   */
+  private updatePieces(dtSec: number, nowMs: number): void {
+    const remaining: NodePiece[] = [];
+    for (const piece of this.nodePieces) {
+      if (nowMs >= piece.untilMs) continue;
+      piece.x += piece.vx * dtSec;
+      piece.y += piece.vy * dtSec;
+      piece.vy += 900 * dtSec;
+      piece.rot += piece.rotV * dtSec;
+      if (piece.y - piece.size > this.lastHeight + 40) continue;
+      remaining.push(piece);
+    }
+    this.nodePieces = remaining.slice(-24);
+  }
+
   // ------------------------------------------------------------- drawing ---
 
   private drawNode(ctx: CanvasRenderingContext2D): void {
-    const { x, y } = this.nodeCenter();
-    const r = this.nodeRadius();
+    const { x, y, rx, ry } = this.nodeCenter();
+    const tier = this.activeTier;
     ctx.save();
     // Ground shadow.
     ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
     ctx.beginPath();
-    ctx.ellipse(x, y + r * 0.95, r * 1.05, r * 0.22, 0, 0, Math.PI * 2);
+    ctx.ellipse(x, y + ry * 0.95, rx * 1.05, ry * 0.22, 0, 0, Math.PI * 2);
     ctx.fill();
-    // Boulder.
-    ctx.fillStyle = '#8d7d6b';
-    ctx.strokeStyle = '#5d5145';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    // Highlight.
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
-    ctx.beginPath();
-    ctx.ellipse(x - r * 0.35, y - r * 0.4, r * 0.4, r * 0.25, -0.5, 0, Math.PI * 2);
-    ctx.fill();
-    // Gem glint.
-    ctx.fillStyle = '#4dd8ff';
-    ctx.beginPath();
-    ctx.moveTo(x + r * 0.35, y - r * 0.55);
-    ctx.lineTo(x + r * 0.5, y - r * 0.35);
-    ctx.lineTo(x + r * 0.35, y - r * 0.15);
-    ctx.lineTo(x + r * 0.2, y - r * 0.35);
-    ctx.closePath();
-    ctx.fill();
-    // Cracks: jagged lines from the top, one per hit (max 3).
+    // Rock body: the real RuneSpace boulder art, cover-fit into the
+    // ellipse. The drawn rock is the fallback when the art has not
+    // loaded (or failed to load) — never a hole in the stage.
+    const boulder = this.boulderImage;
+    if (boulder !== null && boulder.loaded) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+      ctx.clip();
+      const scale = Math.max(
+        (rx * 2) / boulder.img.width,
+        (ry * 2) / boulder.img.height,
+      );
+      const dw = boulder.img.width * scale;
+      const dh = boulder.img.height * scale;
+      ctx.drawImage(boulder.img, x - dw / 2, y - dh / 2, dw, dh);
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = '#8d7d6b';
+      ctx.strokeStyle = '#5d5145';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      // Highlight.
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+      ctx.beginPath();
+      ctx.ellipse(
+        x - rx * 0.35,
+        y - ry * 0.4,
+        rx * 0.4,
+        ry * 0.25,
+        -0.5,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
+    // Ore crystals embedded in the rock face, in the active tier's
+    // colour: rusty orange for Ferrite Shale, bright silver for
+    // Galvanite (sampled from the real art).
+    ctx.fillStyle = tier.crystalColor;
+    const crystals: readonly (readonly [number, number, number])[] = [
+      [-0.35, -0.35, 0.16],
+      [0.3, -0.45, 0.13],
+      [0.05, 0.12, 0.18],
+    ];
+    for (const [dx, dy, size] of crystals) {
+      const cx = x + dx * rx;
+      const cy = y + dy * ry;
+      const w = rx * size;
+      const h = ry * size * 1.4;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - h);
+      ctx.lineTo(cx + w, cy);
+      ctx.lineTo(cx, cy + h);
+      ctx.lineTo(cx - w, cy);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // Cracks: jagged lines from the top, one per hit (max 3). They get
+    // thicker and the rock darkens as the hits pile up, so the crack
+    // stages read clearly instead of all looking the same.
     const cracks = cracksForHits(this.nodeHits);
+    if (this.nodeHits > 0) {
+      ctx.fillStyle = `rgba(0, 0, 0, ${0.07 * this.nodeHits})`;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.strokeStyle = '#3a3128';
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 3 + cracks;
     ctx.lineCap = 'round';
     const crackPaths: readonly (readonly [number, number][])[] = [
       [[0, -0.85], [0.08, -0.4], [-0.05, -0.05]],
@@ -421,8 +911,8 @@ export class SwingLabGame implements Game {
       if (path === undefined) continue;
       ctx.beginPath();
       path.forEach(([dx, dy], j) => {
-        const px = x + dx * r;
-        const py = y + dy * r;
+        const px = x + dx * rx;
+        const py = y + dy * ry;
         if (j === 0) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       });
@@ -436,7 +926,89 @@ export class SwingLabGame implements Game {
     ctx.fillStyle = '#e8e8f0';
     const pips =
       '🪨'.repeat(this.nodeHits) + '⬜'.repeat(SWING.hitsPerNode - this.nodeHits);
-    ctx.fillText(pips, x, y + r + 26);
+    ctx.fillText(pips, x, y + ry + 26);
+  }
+
+  /**
+   * Ore drops flying from the node toward the Ore counter: the real ore
+   * image for the tier they came from, arcing up out of the rock and
+   * down to the bottom-left of the stage, shrinking and fading. If the
+   * image has not loaded, the drawn gem in the tier's crystal colour.
+   */
+  private drawOreDrops(ctx: CanvasRenderingContext2D, nowMs: number): void {
+    ctx.save();
+    for (const drop of this.oreDrops) {
+      const t = clamp((nowMs - drop.startMs) / drop.durationMs, 0, 1);
+      const px = drop.fromX + (drop.toX - drop.fromX) * t;
+      const py =
+        drop.fromY +
+        (drop.toY - drop.fromY) * t -
+        Math.sin(Math.PI * t) * 90;
+      const size = 46 * (1 - 0.35 * t);
+      ctx.globalAlpha =
+        t > 0.75 ? clamp(1 - (t - 0.75) / 0.25, 0, 1) : 1;
+      const image = this.oreImages.get(drop.tierId);
+      if (image !== undefined && image.loaded) {
+        ctx.drawImage(image.img, px - size / 2, py - size / 2, size, size);
+      } else {
+        const tier = tierById(drop.tierId) ?? this.activeTier;
+        ctx.fillStyle = tier.crystalColor;
+        ctx.beginPath();
+        ctx.moveTo(px, py - size / 2);
+        ctx.lineTo(px + size * 0.35, py);
+        ctx.lineTo(px, py + size / 2);
+        ctx.lineTo(px - size * 0.35, py);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Mine selector, bottom-right: one chip per tier in `MINING_TIERS`.
+   * The active mine is highlighted; a locked mine shows its level
+   * requirement (tapping it shows the full lock message as a floater).
+   * Adding a tier is data-only — a new chip appears here on its own.
+   * `pointerDownAt` (via the canvas listener) makes the chips tappable.
+   */
+  private drawTierChips(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+  ): void {
+    const level = miningLevel(this.xp);
+    const chipW = 330;
+    const chipH = 38;
+    const gap = 8;
+    const x = width - chipW - 12;
+    this.chipRects = [];
+    ctx.save();
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = `18px ${RENDER.gameFont}`;
+    MINING_TIERS.forEach((tier, i) => {
+      const cy =
+        height - 12 - (MINING_TIERS.length - i) * chipH - (MINING_TIERS.length - 1 - i) * gap;
+      const unlocked = tierUnlocked(tier, level);
+      const active = tier.id === this.activeTier.id;
+      this.chipRects.push({ x, y: cy, w: chipW, h: chipH, tierId: tier.id });
+      ctx.fillStyle = active
+        ? 'rgba(255, 209, 102, 0.25)'
+        : 'rgba(11, 11, 18, 0.72)';
+      ctx.fillRect(x, cy, chipW, chipH);
+      ctx.strokeStyle = active ? '#ffd166' : 'rgba(232, 232, 240, 0.5)';
+      ctx.lineWidth = active ? 3 : 2;
+      ctx.strokeRect(x, cy, chipW, chipH);
+      ctx.fillStyle = unlocked ? '#e8e8f0' : '#b9b9d6';
+      const label = !unlocked
+        ? `🔒 ${tier.name} — ${tier.location} (Lv ${tier.requiredMiningLevel})`
+        : active
+          ? `✓ ${tier.name} — ${tier.location}`
+          : `⛏️ ${tier.name} — ${tier.location}`;
+      ctx.fillText(label, x + 10, cy + chipH / 2);
+    });
+    ctx.restore();
   }
 
   private drawParticles(ctx: CanvasRenderingContext2D): void {
@@ -444,9 +1016,65 @@ export class SwingLabGame implements Game {
     for (const p of this.particles) {
       ctx.fillStyle = p.color;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.restore();
+  }
+
+  /** Tumbling rock chunks of a broken node, fading as they fall. */
+  private drawNodePieces(ctx: CanvasRenderingContext2D, nowMs: number): void {
+    ctx.save();
+    for (const piece of this.nodePieces) {
+      const age = 1 - (piece.untilMs - nowMs) / BREAK.pieceLifetimeMs;
+      ctx.globalAlpha = clamp(1 - age * age, 0, 1);
+      ctx.fillStyle = piece.color;
+      ctx.save();
+      ctx.translate(piece.x, piece.y);
+      ctx.rotate(piece.rot);
+      ctx.fillRect(
+        -piece.size / 2,
+        -piece.size / 2,
+        piece.size,
+        piece.size * 0.7,
+      );
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * The respawn wait indicator, drawn where the node broke: a progress
+   * bar filling over `BREAK.respawnMs` with the seconds left above it.
+   * The node is gone while this shows — no mining until it completes.
+   */
+  private drawRespawnBar(ctx: CanvasRenderingContext2D, nowMs: number): void {
+    const pos = this.breakPos ?? {
+      x: this.lastWidth / 2,
+      y: this.lastHeight * 0.5,
+    };
+    const progress = this.respawnProgress(nowMs);
+    const w = 280;
+    const h = 22;
+    const x = pos.x - w / 2;
+    const y = pos.y - h / 2;
+    const secs = Math.max(
+      0,
+      Math.ceil((this.breakAtMs + BREAK.respawnMs - nowMs) / 1000),
+    );
+    ctx.save();
+    ctx.font = `700 22px ${RENDER.gameFont}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e8e8f0';
+    ctx.fillText(`⛏️ New node in ${secs}…`, pos.x, y - 24);
+    ctx.fillStyle = 'rgba(11, 11, 18, 0.72)';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(x, y, w * progress, h);
+    ctx.strokeStyle = 'rgba(232, 232, 240, 0.5)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
     ctx.restore();
   }
 
@@ -464,11 +1092,10 @@ export class SwingLabGame implements Game {
     width: number,
     height: number,
   ): void {
-    const { x: rockX, y: rockY } = this.nodeCenter();
-    const r = this.nodeRadius();
+    const { x: rockX, y: rockY, rx, ry } = this.nodeCenter();
     if (body === null || !body.present) {
       // No body: pickaxe leaning on the rock, waiting for a miner.
-      this.drawPickaxeShape(ctx, rockX - r - 8, rockY + r * 0.4, -0.5, -0.85);
+      this.drawPickaxeShape(ctx, rockX - rx - 8, rockY + ry * 0.4, -0.5, -0.85);
       return;
     }
     const { x, y, dirX, dirY } = pickaxeAnchorForBody(body, width, height);

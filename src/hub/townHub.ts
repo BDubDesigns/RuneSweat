@@ -1,38 +1,50 @@
 /**
- * Town hub overlay (v3.1): the manual-pause screen. Worker A owns
- * the pause state machine that opens / closes this; this module owns
- * only the overlay itself — what it shows and what its taps do.
+ * Town hub (v3.2): town is a PLACE, not a pause menu. Going to town
+ * takes the player OUT of the activity they are in and INTO town; the
+ * hub is a full-screen, opaque screen, and the game is NOT drawn
+ * behind it (main.ts skips the whole game render while the hub is
+ * open, and this module paints its own opaque backdrop first).
+ * Leaving town means picking an activity — Mine, Refiner, or Bix's
+ * shop — or pressing Space / Escape / the Back button, which returns
+ * to the last activity. The auto-pause (body out of frame) is a
+ * different thing: it freezes the activity and never opens the hub.
+ *
+ * Worker A owns the pause state machine that opens / closes this;
+ * this module owns only the town screen itself — what it shows and
+ * what its taps do.
  *
  * INTERFACE (for the coordinator wiring it into `main.ts`):
  * ```ts
  * const hub = new TownHub({
- *   onResume: () => { /* close the hub, resume Swing Lab *\/ },
+ *   onLeaveTown: () => { /* leave town, return to the last activity *\/ },
+ *   onOpenMine: () => { /* switch to the mine (Swing Lab) *\/ },
  *   onOpenRefiner: () => { /* switch to the Refiner game *\/ },
  *   onReset: () => { /* save was reset — refresh any cached HUD *\/ },
  * });
- * hub.open();                 // show the hub (pause machine calls this)
+ * hub.open();                 // show town (pause machine calls this)
  * hub.close();                // hide it (no callback — the caller resumes)
  * hub.isOpen;                 // boolean
- * hub.render(ctx, nowMs);     // draw the overlay; reads the inventory store live
+ * hub.setReturnLabel('⛏ Back to the mine');  // label of the Back button
+ * hub.render(ctx, nowMs);     // draw the town screen; reads the inventory store live
  * hub.handlePointer(x, y);    // canvas-space tap; true when a button was hit
- * hub.handleKey(key);         // ' ' / 'Escape' closes + calls onResume; true when handled
+ * hub.handleKey(key);         // ' ' / 'Escape' leaves town + calls onLeaveTown; true when handled
  * hub.snapshot();             // { open, screen, resetArmed } — for tests / debug HUD
  * ```
  * `main.ts` owns the canvas pointer listener and converts client
  * coordinates to canvas space (same pattern as Swing Lab's
  * `pointerDownAt`); it forwards taps to `handlePointer` while the
  * hub is open, and forwards Space / Escape to `handleKey`.
- * Leaving the hub returns to Swing Lab — the hub never switches
- * games itself except through `onOpenRefiner`.
+ * Leaving town returns to the last activity — the hub never switches
+ * games itself except through `onOpenMine` / `onOpenRefiner`.
  *
  * WHAT IT SHOWS (main screen):
  * - Inventory: ore by tier with the real images, refined materials,
  *   Credits.
  * - Mines open to you: Ferrite Shale — The Jag; Galvanite — Deep Jag,
  *   locked until Mining 5.
- * - Activity spots: Refiner (playable) and Bix's shop (sell). Other
- *   activities (combat etc.) appear as "coming soon" stubs only —
- *   they are NOT built and NOT tappable.
+ * - Activity spots: Mine (back to Swing Lab), Refiner (playable) and
+ *   Bix's shop (sell). Other activities (combat etc.) appear as
+ *   "coming soon" stubs only — they are NOT built and NOT tappable.
  *
  * BIX'S SHOP (shop screen): sell ore / refined for Credits at the
  * `BIX` config prices — Sell 1 and Sell all per item. No daily
@@ -56,13 +68,22 @@ import { MINING_TIERS } from '../games/swing-lab/tiers';
 
 /** Callbacks the coordinator wires to `main.ts` + the game switcher. */
 export interface TownHubCallbacks {
-  /** Close the hub and resume the current game. */
-  onResume: () => void;
+  /** Leave town and return to the last activity (Mine / Refiner). */
+  onLeaveTown: () => void;
+  /** Switch to the mine (Swing Lab). */
+  onOpenMine: () => void;
   /** Switch to the Refiner game. */
   onOpenRefiner: () => void;
   /** The save was reset (after the two-tap confirm). */
   onReset: () => void;
 }
+
+/**
+ * The town screen's background fill — fully opaque, always. The hub
+ * is a place, not a dimmed overlay over the game: nothing shows
+ * through it, and main.ts draws no game behind it either.
+ */
+export const TOWN_BACKGROUND = '#0d0d18';
 
 export type TownHubScreen = 'main' | 'shop';
 
@@ -157,6 +178,13 @@ export class TownHub {
   private openFlag = false;
   private screen: TownHubScreen = 'main';
   private resetArmed = false;
+  /**
+   * Label of the button that returns to the last activity — set by
+   * main.ts when town opens ('⛏ Back to the mine' from mining,
+   * '🔥 Back to refining' from the refiner). Space does the same
+   * thing as this button.
+   */
+  private returnLabel = '⛏ Back to the mine';
   private buttons: ButtonRect[] = [];
   private readonly images = new Map<string, LoadedImage>();
 
@@ -183,6 +211,16 @@ export class TownHub {
 
   public get isOpen(): boolean {
     return this.openFlag;
+  }
+
+  /** Label of the button that returns to the last activity. */
+  public get returnActivityLabel(): string {
+    return this.returnLabel;
+  }
+
+  /** Set the return button's label (main.ts sets it on entering town). */
+  public setReturnLabel(label: string): void {
+    this.returnLabel = label;
   }
 
   public get currentScreen(): TownHubScreen {
@@ -217,37 +255,102 @@ export class TownHub {
   }
 
   /**
-   * Key handling: Space / Escape closes the hub and resumes.
-   * Returns true when the key was handled.
+   * Key handling: Space / Escape leaves town and returns to the last
+   * activity — the same as the Back button. Returns true when the key
+   * was handled.
    */
   public handleKey(key: string): boolean {
     if (!this.openFlag) return false;
     if (key === ' ' || key === 'Escape' || key === 'Esc') {
       this.close();
-      this.callbacks.onResume();
+      this.callbacks.onLeaveTown();
       return true;
     }
     return false;
   }
 
-  /** Draw the overlay. Reads the inventory store live every frame. */
+  /** Draw the town screen. Reads the inventory store live every frame. */
   public render(ctx: CanvasRenderingContext2D, _nowMs: number): void {
     if (!this.openFlag) return;
     const width = ctx.canvas.width;
     const height = ctx.canvas.height;
     ctx.save();
-    // Dim the game behind the menu.
-    ctx.fillStyle = 'rgba(8, 8, 14, 0.82)';
-    ctx.fillRect(0, 0, width, height);
+    // Town's own backdrop: fully opaque, painted first. The game is
+    // never drawn behind the hub, and nothing shows through this.
+    this.drawTownBackdrop(ctx, width, height);
     if (this.screen === 'shop') this.renderShop(ctx, width, height);
     else this.renderMain(ctx, width, height);
     ctx.restore();
   }
 
+  /**
+   * Town's own look (v3.2): a night sky with stars, a moon, and a
+   * rooftop skyline along the bottom — all opaque shapes over the
+   * solid background fill, so the screen is opaque everywhere. The
+   * content (header, inventory, buttons) is drawn over it.
+   */
+  private drawTownBackdrop(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+  ): void {
+    ctx.fillStyle = TOWN_BACKGROUND;
+    ctx.fillRect(0, 0, width, height);
+    // Stars: fixed pseudo-random positions (seeded, so the sky does
+    // not shimmer between frames), upper half only.
+    ctx.fillStyle = '#e8e8f0';
+    let seed = 1234567;
+    const rand = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    for (let i = 0; i < 48; i++) {
+      const x = rand() * width;
+      const y = rand() * height * 0.55;
+      const s = rand() < 0.2 ? 2 : 1;
+      ctx.fillRect(x, y, s, s);
+    }
+    // Moon, top right.
+    ctx.fillStyle = '#f5f0d8';
+    ctx.beginPath();
+    ctx.arc(width - 84, 78, 24, 0, Math.PI * 2);
+    ctx.fill();
+    // Rooftop skyline along the bottom, behind the buttons: dark
+    // houses with lit windows. Heights vary 36–84 px, so the roofs
+    // peek above the bottom button row in the gaps between buttons.
+    let x = 0;
+    let house = 0;
+    while (x < width) {
+      const w = 74 + ((house * 37) % 40);
+      const h = 36 + ((house * 53) % 48);
+      const top = height - h;
+      ctx.fillStyle = '#17172b';
+      ctx.fillRect(x, top, w, h);
+      // Triangular roof.
+      ctx.fillStyle = '#1e1e38';
+      ctx.beginPath();
+      ctx.moveTo(x - 4, top);
+      ctx.lineTo(x + w / 2, top - 18);
+      ctx.lineTo(x + w + 4, top);
+      ctx.closePath();
+      ctx.fill();
+      // One lit window.
+      ctx.fillStyle = '#ffd166';
+      ctx.fillRect(x + w / 2 - 5, top + 14, 10, 12);
+      x += w + 14;
+      house += 1;
+    }
+  }
+
   private activate(action: string): boolean {
-    if (action === 'resume') {
+    if (action === 'leave-town') {
       this.close();
-      this.callbacks.onResume();
+      this.callbacks.onLeaveTown();
+      return true;
+    }
+    if (action === 'mine') {
+      this.close();
+      this.callbacks.onOpenMine();
       return true;
     }
     if (action === 'refiner') {
@@ -320,9 +423,13 @@ export class TownHub {
     opts: { highlight?: boolean; dim?: boolean; fontPx?: number } = {},
   ): void {
     this.buttons.push({ x, y, w, h, action });
+    // Solid fills: the town screen is opaque throughout — no
+    // translucent button over a translucent dim, nothing showing
+    // through from behind. (The highlight is a tint over the solid
+    // town background, which is itself opaque.)
     ctx.fillStyle = opts.highlight
       ? 'rgba(255, 209, 102, 0.25)'
-      : 'rgba(11, 11, 18, 0.72)';
+      : '#171724';
     ctx.fillRect(x, y, w, h);
     ctx.strokeStyle = opts.highlight ? '#ffd166' : 'rgba(232, 232, 240, 0.5)';
     ctx.lineWidth = opts.highlight ? 3 : 2;
@@ -406,13 +513,18 @@ export class TownHub {
       y += 32;
     }
 
-    // RIGHT: activity spots.
+    // RIGHT: activity spots. Leaving town means picking one of these
+    // (or the Back button / Space, which returns to the last one).
     let ry = 116;
     ctx.font = `700 24px ${RENDER.gameFont}`;
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'left';
     ctx.fillText('📍 Activities', rightX, ry);
     ry += 40;
+    this.drawButton(
+      ctx, rightX, ry, colW, 52, '⛏ Mine — The Jag', 'mine', { highlight: true },
+    );
+    ry += 62;
     this.drawButton(
       ctx, rightX, ry, colW, 52, '🔥 Refiner — refine ore', 'refiner', { highlight: true },
     );
@@ -428,10 +540,11 @@ export class TownHub {
       ry += 36;
     }
 
-    // BOTTOM: resume + reset.
+    // BOTTOM: back to the last activity (Space does the same) + reset.
     const bottomY = height - 64;
-    this.drawButton(ctx, margin, bottomY, 260, 48, '▶ Resume (Space)', 'resume', {
+    this.drawButton(ctx, margin, bottomY, 320, 48, `${this.returnLabel} (Space)`, 'leave-town', {
       highlight: true,
+      fontPx: 20,
     });
     this.drawButton(
       ctx,

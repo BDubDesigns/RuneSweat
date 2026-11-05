@@ -5,6 +5,7 @@ import {
   bixSellPrice,
   sellAll,
   sellOne,
+  TOWN_BACKGROUND,
   TownHub,
 } from './townHub';
 
@@ -34,6 +35,46 @@ function stubContext(): CanvasRenderingContext2D {
       return true;
     },
   }) as unknown as CanvasRenderingContext2D;
+}
+
+/**
+ * A recording stand-in: every method call is logged (name + args)
+ * and every `fillStyle` set is recorded, so tests can prove the town
+ * screen paints an opaque full-canvas background first.
+ */
+interface RecordedCall {
+  method: string;
+  args: unknown[];
+}
+function recordingContext(): {
+  ctx: CanvasRenderingContext2D;
+  calls: RecordedCall[];
+  fillStyles: string[];
+  texts: string[];
+} {
+  const calls: RecordedCall[] = [];
+  const fillStyles: string[] = [];
+  const texts: string[] = [];
+  const target: Record<string, unknown> = {};
+  const ctx = new Proxy(target, {
+    get: (_t, prop) => {
+      if (prop === 'canvas') return { width: 960, height: 540 };
+      return (...args: unknown[]) => {
+        calls.push({ method: String(prop), args });
+        if (prop === 'fillText' && typeof args[0] === 'string') {
+          texts.push(args[0]);
+        }
+      };
+    },
+    set: (t, prop, value) => {
+      if (prop === 'fillStyle' && typeof value === 'string') {
+        fillStyles.push(value);
+      }
+      t[prop as string] = value;
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+  return { ctx, calls, fillStyles, texts };
 }
 
 describe('Bix sell prices (active-game-only)', () => {
@@ -76,7 +117,8 @@ describe('TownHub', () => {
   function setup() {
     const calls: string[] = [];
     const hub = new TownHub({
-      onResume: () => calls.push('resume'),
+      onLeaveTown: () => calls.push('leave-town'),
+      onOpenMine: () => calls.push('mine'),
       onOpenRefiner: () => calls.push('refiner'),
       onReset: () => calls.push('reset'),
     });
@@ -84,7 +126,7 @@ describe('TownHub', () => {
     return { hub, ctx, calls };
   }
 
-  it('opens closed, renders, and Space resumes', () => {
+  it('opens closed, renders, and Space leaves town', () => {
     const { hub, ctx, calls } = setup();
     expect(hub.isOpen).toBe(false);
     expect(hub.handlePointer(500, 200)).toBe(false);
@@ -93,24 +135,34 @@ describe('TownHub', () => {
     expect(() => hub.render(ctx, 1000)).not.toThrow();
     expect(hub.handleKey(' ')).toBe(true);
     expect(hub.isOpen).toBe(false);
-    expect(calls).toEqual(['resume']);
+    expect(calls).toEqual(['leave-town']);
   });
 
-  it('Escape also resumes; other keys do nothing', () => {
+  it('Escape also leaves town; other keys do nothing', () => {
     const { hub, calls } = setup();
     hub.open();
     expect(hub.handleKey('a')).toBe(false);
     expect(hub.isOpen).toBe(true);
     expect(hub.handleKey('Escape')).toBe(true);
-    expect(calls).toEqual(['resume']);
+    expect(calls).toEqual(['leave-town']);
+  });
+
+  it('Mine button leaves town for the mine', () => {
+    const { hub, ctx, calls } = setup();
+    hub.open();
+    hub.render(ctx, 1000);
+    // Right column, first activity button: x 492..936, y 156..208.
+    expect(hub.handlePointer(600, 182)).toBe(true);
+    expect(calls).toEqual(['mine']);
+    expect(hub.isOpen).toBe(false);
   });
 
   it('Refiner button opens the refiner (and closes the hub)', () => {
     const { hub, ctx, calls } = setup();
     hub.open();
     hub.render(ctx, 1000);
-    // Right column, first activity button: x 492..936, y 156..208.
-    expect(hub.handlePointer(600, 180)).toBe(true);
+    // Right column, second activity button: x 492..936, y 218..270.
+    expect(hub.handlePointer(600, 244)).toBe(true);
     expect(calls).toEqual(['refiner']);
     expect(hub.isOpen).toBe(false);
   });
@@ -120,8 +172,8 @@ describe('TownHub', () => {
     inventory.add('ferrite-shale', 5);
     hub.open();
     hub.render(ctx, 1000);
-    // Shop button: right column, second activity button, y 218..270.
-    expect(hub.handlePointer(600, 244)).toBe(true);
+    // Shop button: right column, third activity button, y 280..332.
+    expect(hub.handlePointer(600, 306)).toBe(true);
     expect(hub.currentScreen).toBe('shop');
     expect(calls).toEqual([]);
     hub.render(ctx, 1000);
@@ -170,7 +222,63 @@ describe('TownHub', () => {
     inventory.add('refined-ferrite', 1);
     hub.open();
     hub.render(ctx, 1000);
-    expect(hub.handlePointer(600, 244)).toBe(true);
+    expect(hub.handlePointer(600, 306)).toBe(true);
     expect(() => hub.render(ctx, 1000)).not.toThrow();
+  });
+
+  it('the town screen is opaque: full-canvas solid fill first (v3.2)', () => {
+    const { hub, calls } = setup();
+    const rec = recordingContext();
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    expect(calls).toEqual([]);
+    // The first fillRect of the frame covers the whole canvas, and
+    // the fill in effect for it is the solid town background — no
+    // dimmed overlay, nothing showing through from behind.
+    const firstFill = rec.calls.find((c) => c.method === 'fillRect');
+    expect(firstFill).toBeDefined();
+    expect(firstFill?.args).toEqual([0, 0, 960, 540]);
+    expect(rec.fillStyles[0]).toBe(TOWN_BACKGROUND);
+    expect(TOWN_BACKGROUND).not.toContain('rgba');
+    // The shop screen paints the same opaque backdrop.
+    hub.handlePointer(600, 306);
+    expect(hub.currentScreen).toBe('shop');
+    rec.calls.length = 0;
+    rec.fillStyles.length = 0;
+    hub.render(rec.ctx, 1000);
+    const shopFirstFill = rec.calls.find((c) => c.method === 'fillRect');
+    expect(shopFirstFill?.args).toEqual([0, 0, 960, 540]);
+    expect(rec.fillStyles[0]).toBe(TOWN_BACKGROUND);
+  });
+
+  it('no "Pause" / "Resume" wording anywhere in the town UI strings (v3.2)', () => {
+    const { hub } = setup();
+    const rec = recordingContext();
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    hub.handlePointer(600, 306);
+    hub.render(rec.ctx, 1000);
+    for (const text of rec.texts) {
+      expect(text).not.toMatch(/pause/i);
+      expect(text).not.toMatch(/resume/i);
+    }
+  });
+
+  it('the Back button returns to the last activity, and Space does the same', () => {
+    const { hub, ctx, calls } = setup();
+    // Default: the mine.
+    expect(hub.returnActivityLabel).toBe('⛏ Back to the mine');
+    hub.open();
+    hub.render(ctx, 1000);
+    // Back button: bottom-left, x 24..344, y 476..524.
+    expect(hub.handlePointer(180, 500)).toBe(true);
+    expect(calls).toEqual(['leave-town']);
+    expect(hub.isOpen).toBe(false);
+    // From the refiner the label (set by main.ts) names refining.
+    hub.setReturnLabel('🔥 Back to refining');
+    expect(hub.returnActivityLabel).toBe('🔥 Back to refining');
+    hub.open();
+    expect(hub.handleKey(' ')).toBe(true);
+    expect(calls).toEqual(['leave-town', 'leave-town']);
   });
 });

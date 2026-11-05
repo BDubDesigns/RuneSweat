@@ -70,8 +70,50 @@ export const GATE = {
    * started with no usable pose ever is gated immediately (no grace).
    * Staleness (see `staleFrameMs`) beats the grace period: a frozen frame
    * must not stay open via grace.
+   *
+   * This is the DEFAULT (swing) grace. Activities with their own grace
+   * live in `GATE_ACTIVITIES` below — the gate reads the active
+   * activity's grace, not this one, when the caller passes requirements.
    */
   gracePeriodMs: 500,
+} as const;
+
+/**
+ * Per-activity gate requirements (v3.2, Nov 4 playtest): the gate takes
+ * what the activity actually needs, not one global rule.
+ *
+ * The Nov 4 refining playtest kept tripping the gate while Brandon was
+ * standing right there: the global rule required knees, and reaching
+ * side to side (pile far left, hopper far right) + leaning toward the
+ * laptop dipped the far knee below visibility or out of frame.
+ *
+ * - `swing`: the full-body game. Knees are a real reference — the Nov
+ *   4 playtest showed "Body found" with the knees hidden, which is
+ *   why `requireKnees` exists — so they stay required, and the grace
+ *   stays short (500 ms): a swing with a lost body must stop fast.
+ * - `refiner-carry` (pick-up / carry / drop): the hands are the point
+ *   — the grab logic itself needs both wrists together over the pile,
+ *   so the gate does not also need to see the wrists (BodyState does
+ *   not carry wrist visibility). What the gate checks is shoulders +
+ *   hips; knees are NOT required. Grace 1500 ms: a brief dip while
+ *   reaching or leaning must not trip it.
+ * - `refiner-jump` (star jumps): same body rule as carry (shoulders
+ *   + hips, 1500 ms grace). The ankles are the jump signal, but the
+ *   leg-spread check lives in the star-jump detector itself — the
+ *   gate cannot see ankle visibility (BodyState does not carry it),
+ *   so it does not pretend to. If `BodyState` ever carries wrist /
+ *   ankle visibility, the gate requirements should grow `requireWrists`
+ *   / `requireAnkles` and enforce them here.
+ * - `picker`: null — no gate at all. Picking a recipe is a mouse
+ *   click; no body is needed, and the gate must not pause anything
+ *   or draw anything over the chips. The caller passes null as the
+ *   requirements and `evaluateGate` returns open.
+ */
+export const GATE_ACTIVITIES = {
+  swing: { requireKnees: true, gracePeriodMs: 500 },
+  'refiner-carry': { requireKnees: false, gracePeriodMs: 1500 },
+  'refiner-jump': { requireKnees: false, gracePeriodMs: 1500 },
+  picker: null,
 } as const;
 
 /** Fixed-timestep loop constants. */

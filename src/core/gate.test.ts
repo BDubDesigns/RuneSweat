@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateGate, type ModelState } from './gate';
+import {
+  bodyUsableForActivity,
+  evaluateGate,
+  gateRequirementsFor,
+  missingBodyParts,
+  shouldShowGateBanner,
+  type ModelState,
+} from './gate';
 import { BodyStateTracker, type BodyState } from './bodyState';
 import { makeFrame, makePose } from './poseFixture';
 import { PoseLandmark } from '../tracking/poseTypes';
@@ -223,5 +230,220 @@ describe('model state plumbing', () => {
       'inference-stopped',
     ];
     expect(states).toHaveLength(5);
+  });
+});
+
+/**
+ * Banner vs full overlay (v3.2, Nov 4 playtest): a lost body while an
+ * activity screen is up shows only a small top banner — the full dim
+ * + ghost covered the recipe picker, tier chips and Leave control.
+ * Model problems always keep the loud full overlay.
+ */
+describe('shouldShowGateBanner', () => {
+  it('banners a lost body while an activity screen is up', () => {
+    expect(
+      shouldShowGateBanner({ reason: 'no-body', activityScreenUp: true }),
+    ).toBe(true);
+  });
+
+  it('keeps the full overlay (with ghost) on an empty stage', () => {
+    expect(
+      shouldShowGateBanner({ reason: 'no-body', activityScreenUp: false }),
+    ).toBe(false);
+  });
+
+  it('never banners a model problem, even with an activity screen up', () => {
+    for (const reason of [
+      'model-failed',
+      'model-loading',
+      'inference-stopped',
+      'stale-frame',
+    ] as const) {
+      expect(shouldShowGateBanner({ reason, activityScreenUp: true })).toBe(
+        false,
+      );
+    }
+  });
+
+  it('never banners an open gate', () => {
+    expect(
+      shouldShowGateBanner({ reason: 'open', activityScreenUp: true }),
+    ).toBe(false);
+  });
+});
+
+/**
+ * Per-activity gate requirements (v3.2, Nov 4 playtest): the refining
+ * gate kept firing while Brandon was standing right there — the global
+ * rule required knees, and a side reach dipped the far knee. The
+ * refiner drops the knee requirement and gets a longer grace; the
+ * swing keeps both; the picker has no gate at all.
+ */
+describe('per-activity gate requirements (v3.2)', () => {
+  /** A body whose shoulders the model barely sees. */
+  function shouldersHiddenBody(): BodyState {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      visibilityOverrides: {
+        [PoseLandmark.LEFT_SHOULDER]: 0.1,
+        [PoseLandmark.RIGHT_SHOULDER]: 0.1,
+      },
+    });
+    return tracker.update(makeFrame(pose, 1000));
+  }
+
+  it('gateRequirementsFor returns the per-activity presets', () => {
+    expect(gateRequirementsFor('swing')).toEqual({
+      requireKnees: true,
+      gracePeriodMs: 500,
+    });
+    expect(gateRequirementsFor('refiner-carry')).toEqual({
+      requireKnees: false,
+      gracePeriodMs: 1500,
+    });
+    expect(gateRequirementsFor('refiner-jump')).toEqual({
+      requireKnees: false,
+      gracePeriodMs: 1500,
+    });
+    expect(gateRequirementsFor('picker')).toBeNull();
+  });
+
+  it('refiner pick/carry opens with knees hidden; the swing does not', () => {
+    const body = kneesHiddenBody();
+    expect(body.bodyUsable).toBe(false);
+    expect(
+      bodyUsableForActivity(body, gateRequirementsFor('refiner-carry') ?? {
+        requireKnees: false,
+        gracePeriodMs: 1500,
+      }),
+    ).toBe(true);
+    expect(
+      bodyUsableForActivity(body, gateRequirementsFor('swing') ?? {
+        requireKnees: true,
+        gracePeriodMs: 500,
+      }),
+    ).toBe(false);
+    // End to end: the refiner gate opens on the same body.
+    const carry = evaluateGate(body, 1000, null, 'ready', {
+      requirements: gateRequirementsFor('refiner-carry'),
+    });
+    expect(carry.gated).toBe(false);
+    expect(carry.reason).toBe('open');
+    const swing = evaluateGate(body, 1000, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(swing.gated).toBe(true);
+    expect(swing.reason).toBe('no-body');
+  });
+
+  it('the star-jump phase uses the same carry rule (ankles are the detector’s job)', () => {
+    const body = kneesHiddenBody();
+    const gate = evaluateGate(body, 1000, null, 'ready', {
+      requirements: gateRequirementsFor('refiner-jump'),
+    });
+    expect(gate.gated).toBe(false);
+  });
+
+  it('refiner grace is 1500 ms; swing grace stays 500 ms', () => {
+    const carryReq = gateRequirementsFor('refiner-carry');
+    const swingReq = gateRequirementsFor('swing');
+    // 1400 ms after the last usable frame: both still open.
+    expect(
+      evaluateGate(noBody(), 2400, 1000, 'ready', {
+        requirements: carryReq,
+      }).gated,
+    ).toBe(false);
+    expect(
+      evaluateGate(noBody(), 1400, 1000, 'ready', {
+        requirements: swingReq,
+      }).gated,
+    ).toBe(false);
+    // 1500 ms after: the swing tripped long ago, the refiner is still
+    // open (the grace is inclusive: 1500 <= 1500).
+    expect(
+      evaluateGate(noBody(), 2500, 1000, 'ready', {
+        requirements: carryReq,
+      }).gated,
+    ).toBe(false);
+    expect(
+      evaluateGate(noBody(), 1600, 1000, 'ready', {
+        requirements: swingReq,
+      }).gated,
+    ).toBe(true);
+    // Past the refiner grace it trips too.
+    expect(
+      evaluateGate(noBody(), 2501, 1000, 'ready', {
+        requirements: carryReq,
+      }).gated,
+    ).toBe(true);
+  });
+
+  it('an explicit gracePeriodMs still overrides the requirement grace', () => {
+    expect(
+      evaluateGate(noBody(), 1600, 1000, 'ready', {
+        requirements: gateRequirementsFor('refiner-carry'),
+        gracePeriodMs: 500,
+      }).gated,
+    ).toBe(true);
+  });
+
+  it('the picker has no gate: open with no body, a failed model, a frozen feed', () => {
+    for (const model of ['ready', 'failed', 'loading'] as const) {
+      const gate = evaluateGate(noBody(), 1000, 1000, model, {
+        requirements: gateRequirementsFor('picker'),
+        frameAgeMs: 3000,
+      });
+      expect(gate.gated).toBe(false);
+      expect(gate.reason).toBe('open');
+      // The grace clock is not advanced by the picker.
+      expect(gate.lastUsableMs).toBe(1000);
+    }
+  });
+
+  it('a frozen feed still closes the refiner gate (stale rule untouched)', () => {
+    const gate = evaluateGate(usableBody(), 1000, null, 'ready', {
+      requirements: gateRequirementsFor('refiner-carry'),
+      frameAgeMs: 3000,
+    });
+    expect(gate.gated).toBe(true);
+    expect(gate.reason).toBe('stale-frame');
+  });
+
+  it('the no-body message names the missing landmarks', () => {
+    const knees = evaluateGate(kneesHiddenBody(), 1000, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(knees.message).toBe("I can't see your knees — step back");
+    const shoulders = evaluateGate(shouldersHiddenBody(), 1000, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(shoulders.message).toBe(
+      "I can't see your shoulders — step back",
+    );
+    // A lost body mid-game names what is missing too, not the generic line.
+    const lost = evaluateGate(kneesHiddenBody(), 2000, 1000, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(lost.gated).toBe(true);
+    expect(lost.message).toBe("I can't see your knees — step back");
+    // No body at all keeps the generic lines (existing contract).
+    expect(
+      evaluateGate(noBody(), 1000, null, 'ready').message,
+    ).toBe('Step back so I can see your whole body');
+    expect(
+      evaluateGate(noBody(), 1600, 1000, 'ready', { gracePeriodMs: 500 })
+        .message,
+    ).toBe("Step back — I can't see your body");
+  });
+
+  it('missingBodyParts lists what is missing (knees only when required)', () => {
+    const body = kneesHiddenBody();
+    expect(
+      missingBodyParts(body, gateRequirementsFor('swing')),
+    ).toEqual(['knees']);
+    expect(
+      missingBodyParts(body, gateRequirementsFor('refiner-carry')),
+    ).toEqual([]);
+    expect(missingBodyParts(null, gateRequirementsFor('swing'))).toEqual([]);
   });
 });

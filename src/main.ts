@@ -22,17 +22,26 @@
 import './styles.css';
 
 import replayFixture from '../fixtures/replay-sweep.json';
-import { GAMES, GATE, LOOP, OUTFIT, SOURCE_SELECTION, STAGE } from './core/config';
+import { GAMES, LOOP, OUTFIT, SOURCE_SELECTION, STAGE } from './core/config';
 import { startCamera, stopCamera, CameraError } from './core/camera';
 import { SoundEffects } from './core/audio';
 import { BodyStateTracker, type BodyState } from './core/bodyState';
-import { evaluateGate, type GateOptions, type GateState, type ModelState } from './core/gate';
+import {
+  evaluateGate,
+  gateRequirementsFor,
+  shouldShowGateBanner,
+  type GateActivity,
+  type GateOptions,
+  type GateState,
+  type ModelState,
+} from './core/gate';
 import { createFixedStepLoop } from './core/loop';
 import { drawHud, type HudReadout } from './debug/hud';
 import { syncCanvasBackingStore, toNormalized, type Vec2 } from './render/stage';
 import { AvatarRenderer } from './render/avatar';
 import {
   drawBlockingOverlay,
+  drawGateBanner,
   drawSkeleton,
   drawStageBackground,
   drawVideoMirrored,
@@ -70,14 +79,17 @@ function requireElement<T extends HTMLElement>(id: string, ctor: new () => T): T
 }
 
 /**
- * Pause kinds (Swing Lab v3.1, Nov 4, 2026). Two ways a game can be
+ * Pause kinds (Swing Lab v3.1, reworded v3.2). Two ways a game can be
  * paused, and they must not be confused:
  *
- * - `manual`: the player pressed Spacebar or the Pause button. Opens
- *   the town-hub overlay and STAYS paused until Spacebar / Pause is
- *   pressed again — coming back into frame must NOT resume it.
+ * - `manual`: the player pressed Spacebar or the Town button. They
+ *   are IN TOWN now, not "paused" — the game is paused behind town,
+ *   town stays open until they pick an activity or press Space /
+ *   Town again to return, and coming back into frame must NOT bring
+ *   them back to the game. (The kind is still called `manual`
+ *   internally; only the player-facing words changed.)
  * - `auto`: the body-visible gate closed (body left frame). Resumes
- *   automatically when the body returns. NEVER opens the hub.
+ *   automatically when the body returns. NEVER opens town.
  * - `none`: playing.
  *
  * The old `pausedByGate` boolean could not tell these apart, so a
@@ -87,27 +99,27 @@ function requireElement<T extends HTMLElement>(id: string, ctor: new () => T): T
 export type PauseKind = 'none' | 'manual' | 'auto';
 
 /**
- * Town-hub overlay plug (Worker B, `src/hub/`): the hub opens when the
- * player pauses manually and closes when they resume. main.ts calls
- * these; it never draws the hub itself. Register with
- * `registerHubOverlay`; until one is registered the canvas fallback in
- * main.ts ("Paused — press Space to resume") is the manual-pause
- * surface, and it stands down the moment a hub registers.
+ * Town-hub plug: the hub opens when the player goes to town and
+ * closes when they return to an activity. main.ts calls these; it
+ * never draws the hub itself. Register with `registerHubOverlay`;
+ * until one is registered the canvas fallback in main.ts ("Paused —
+ * press Space to resume") is the manual-pause surface, and it stands
+ * down the moment a hub registers.
  */
 export interface HubOverlay {
-  /** Show the town-hub overlay. Called only for a manual pause, never auto. */
+  /** Show town. Called only when the player goes to town, never auto. */
   open(): void;
-  /** Hide the town-hub overlay. */
+  /** Hide town. */
   close(): void;
 }
 
-/** The town-hub overlay currently registered by `src/hub/`, if any. */
+/** The town hub currently registered by `src/hub/`, if any. */
 let hubOverlay: HubOverlay | null = null;
 
 /**
- * Register (or unregister with `null`) the town-hub overlay. Called by
- * Worker B's hub module at integration; main.ts never imports the hub,
- * so there is no import cycle — the hub imports this function.
+ * Register (or unregister with `null`) the town hub. Called by the
+ * hub module at integration; main.ts never imports the hub, so there
+ * is no import cycle — the hub imports this function.
  */
 export function registerHubOverlay(hub: HubOverlay | null): void {
   hubOverlay = hub;
@@ -115,16 +127,16 @@ export function registerHubOverlay(hub: HubOverlay | null): void {
 
 /**
  * Events the pause state machine raises. main.ts wires them to the game,
- * the Pause button label, and the hub overlay.
+ * the Town button label, and the town hub.
  */
 export interface PauseEvents {
-  /** A manual pause started: the game must pause and the hub must open. */
+  /** The player went to town: the game must pause and town must open. */
   onManualPause(): void;
-  /** A manual pause ended: the hub must close and the game must resume. */
+  /** The player left town: town must close and the game must resume. */
   onManualResume(): void;
-  /** The gate paused the game (body left frame): pause, no hub. */
+  /** The gate paused the game (body left frame): pause, no town. */
   onAutoPause(): void;
-  /** The gate reopened: resume. Never fires while a manual pause holds. */
+  /** The gate reopened: resume. Never fires while the player is in town. */
   onAutoResume(): void;
 }
 
@@ -134,20 +146,20 @@ export interface PauseEvents {
  *
  * | from   | event            | to       | side effect                  |
  * |--------|------------------|----------|------------------------------|
- * | none   | toggleManual     | manual   | onManualPause (hub opens)  |
- * | manual | toggleManual     | none     | onManualResume (hub closes)|
+ * | none   | toggleManual     | manual   | onManualPause (town opens) |
+ * | manual | toggleManual     | none     | onManualResume (town closes)|
  * | auto   | toggleManual     | manual   | onManualPause (CONVERTS:   |
  * |        |                  |          | the press is honoured, the |
- * |        |                  |          | game stays paused, hub     |
+ * |        |                  |          | game stays paused, town    |
  * |        |                  |          | opens; stepping back into  |
  * |        |                  |          | frame no longer resumes)   |
- * | none   | gateClosed       | auto     | onAutoPause (no hub)       |
+ * | none   | gateClosed       | auto     | onAutoPause (no town)      |
  * | manual | gateClosed       | manual   | nothing (gate must not     |
- * |        |                  |          | touch a manual pause)      |
+ * |        |                  |          | touch town)                |
  * | auto   | gateClosed       | auto     | nothing                    |
  * | auto   | gateOpened       | none     | onAutoResume               |
  * | manual | gateOpened       | manual   | nothing (body returning    |
- * |        |                  |          | must NOT resume it)        |
+ * |        |                  |          | must NOT leave town)       |
  * | none   | gateOpened       | none     | nothing                    |
  * | any    | reset            | none     | the matching resume event  |
  * |        |                  |          | (manual -> onManualResume, |
@@ -158,7 +170,7 @@ export class PauseController {
 
   public constructor(private readonly events: PauseEvents) {}
 
-  /** Spacebar / Pause button. */
+  /** Spacebar / Town button. */
   public toggleManual(): void {
     if (this.kind === 'manual') {
       this.kind = 'none';
@@ -187,7 +199,7 @@ export class PauseController {
     // 'manual' stays manual; 'none' stays none.
   }
 
-  /** Restart / quit / new game: clear any pause, closing the hub. */
+  /** Restart / quit / new game: clear any pause, closing town. */
   public reset(): void {
     if (this.kind === 'manual') {
       this.kind = 'none';
@@ -274,30 +286,37 @@ function main(): void {
   };
   /**
    * Two pause kinds (v3.1) — see `PauseController`. The controller owns
-   * the state; these callbacks wire it to the game, the Pause button
-   * label, and the town-hub overlay (Worker B's module, via
-   * `registerHubOverlay`). The callbacks read `activeGame` at call
+   * the state; these callbacks wire it to the game, the Town button
+   * label, and the town hub. The callbacks read `activeGame` at call
    * time, so they stay correct across game switches.
+   *
+   * Town labels (v3.2): while playing the button says "🏠 Town" and
+   * takes the player to town; while in town it says where Space /
+   * the button will take them back to ("⛏ Back to the mine" /
+   * "🔥 Back to refining"), and the hub's own Back button says the
+   * same thing. There is no "Pause" label anywhere in the live UI.
    */
   const pause = new PauseController({
     onManualPause: () => {
       activeGame?.pause();
-      btnPause.textContent = '▶ Play';
+      const label = returnLabelFor(activeGame);
+      townHub.setReturnLabel(label);
+      btnPause.textContent = label;
       hubOverlay?.open();
     },
     onManualResume: () => {
       activeGame?.resume();
-      btnPause.textContent = '⏸ Pause';
+      btnPause.textContent = '🏠 Town';
       hubOverlay?.close();
     },
     onAutoPause: () => {
       activeGame?.pause();
-      // Label stays '⏸ Pause': pressing it now converts to a manual
-      // pause (opens the hub) instead of resuming into a closed gate.
+      // Label stays '🏠 Town': pressing it now converts to town
+      // (opens the hub) instead of resuming into a closed gate.
     },
     onAutoResume: () => {
       activeGame?.resume();
-      btnPause.textContent = '⏸ Pause';
+      btnPause.textContent = '🏠 Town';
     },
   });
   /**
@@ -310,24 +329,37 @@ function main(): void {
   /**
    * Game-swap state for the town hub / refiner (v3.1). Swing Lab is
    * SUSPENDED, not stopped, while the player refines: stopping it
-   * would reset its node and session, and the hub is a pause, not a
+   * would reset its node and session, and going to town is not a
    * quit. The refiner is a fresh instance every time it opens.
    */
   let suspendedGame: Game | null = null;
 
   /**
-   * The town hub overlay (Worker B, `src/hub/townHub.ts`): the manual
-   * pause screen. main.ts owns it (no import cycle — the hub imports
+   * Label for the way back out of town (v3.2): Space, the Town
+   * button while town is open, and the hub's own Back button all
+   * return to the last activity, and all three say the same thing.
+   */
+  function returnLabelFor(game: Game | null): string {
+    if (game instanceof RefinerGame) return '🔥 Back to refining';
+    return '⛏ Back to the mine';
+  }
+
+  /**
+   * The town hub (`src/hub/townHub.ts`): town is a place, not a pause
+   * menu. main.ts owns it (no import cycle — the hub imports
    * nothing from main.ts) and registers it through the
-   * `registerHubOverlay` plug above so the pause machine can open and
-   * close it.
+   * `registerHubOverlay` plug above so the pause machine can open
+   * and close it.
    */
   const townHub = new TownHub({
-    onResume: () => {
-      // Space / Escape / the hub's Resume button: leave the manual
-      // pause, which resumes whichever game is active (Swing Lab or
-      // the refiner) and closes the hub.
+    onLeaveTown: () => {
+      // Space / Escape / the hub's Back button / the Town button:
+      // leave town, which returns to whichever game is active
+      // (Swing Lab or the refiner) and resumes it.
       pause.toggleManual();
+    },
+    onOpenMine: () => {
+      openMine();
     },
     onOpenRefiner: () => {
       openRefiner();
@@ -339,16 +371,34 @@ function main(): void {
   registerHubOverlay(townHub);
 
   /**
+   * The hub's Mine spot: leave town for the mine (Swing Lab). From
+   * the mine it is the same as the Back button; from the refiner it
+   * drops the refiner and restores the suspended Swing Lab, then
+   * leaves town. Stopping the refiner abandons its batch and returns
+   * its ore to inventory (see `RefinerGame.stop`), so nothing is lost.
+   */
+  function openMine(): void {
+    if (activeGame instanceof RefinerGame) {
+      activeGame.stop();
+      if (suspendedGame !== null) {
+        activeGame = suspendedGame;
+        suspendedGame = null;
+      }
+    }
+    if (pause.kind === 'manual') pause.toggleManual();
+  }
+
+  /**
    * Switch from the (suspended) Swing Lab to a fresh Refiner game.
-   * Called from the hub's Refiner spot. The swap happens before the
-   * manual pause is left, so the pause machine's resume event lands
-   * on the refiner (now the active game), not on Swing Lab — and the
+   * Called from the hub's Refiner spot. The swap happens before
+   * leaving town, so the pause machine's resume event lands on the
+   * refiner (now the active game), not on Swing Lab — and the
    * suspended game stays paused.
    */
   function openRefiner(): void {
     if (activeGame instanceof RefinerGame) {
-      // Already refining (paused via Space, hub open on top): just
-      // resume it.
+      // Already refining (went to town from the refiner): just
+      // return to it.
       pause.toggleManual();
       return;
     }
@@ -360,8 +410,8 @@ function main(): void {
       handleLeaveRefiner();
     };
     activeGame = refiner;
-    // Leave the manual pause (hub closes via onManualResume). The
-    // refiner's start() is deferred to the next update, like any game.
+    // Leave town (hub closes via onManualResume). The refiner's
+    // start() is deferred to the next update, like any game.
     if (pause.kind === 'manual') pause.toggleManual();
     pendingStart = true;
   }
@@ -369,7 +419,7 @@ function main(): void {
   /**
    * The refiner's "Leave to town" was tapped: the batch is already
    * abandoned (the refiner does that before firing), so restore the
-   * suspended Swing Lab and reopen the hub under a manual pause.
+   * suspended Swing Lab and reopen town.
    */
   function handleLeaveRefiner(): void {
     const refiner = activeGame instanceof RefinerGame ? activeGame : null;
@@ -381,8 +431,8 @@ function main(): void {
       activeGame = suspendedGame;
       suspendedGame = null;
     }
-    // The refiner was running unpaused: toggle into a manual pause,
-    // which pauses the restored game and reopens the hub.
+    // The refiner was running unpaused: toggle into town, which
+    // pauses the restored game and opens the hub.
     if (pause.kind === 'none') pause.toggleManual();
   }
 
@@ -390,8 +440,8 @@ function main(): void {
    * The hub's two-tap Reset cleared the save: a refiner that is
    * active is dropped (its hopper / carried ore no longer exists)
    * and the suspended game is restored, then the Swing Lab display
-   * is restarted so it re-reads the now-empty store — and kept
-   * paused, because the player is still sitting in the hub.
+   * is restarted so it re-reads the now-empty store — and kept in
+   * town, because the player is still sitting there.
    */
   function handleSaveReset(): void {
     if (activeGame instanceof RefinerGame) {
@@ -405,6 +455,22 @@ function main(): void {
       activeGame.restart();
       activeGame.pause();
     }
+  }
+
+  /**
+   * Which activity the gate should judge (v3.2): the refiner's picker
+   * has no gate, carry/drop and star jumps use the refiner rule
+   * (shoulders + hips, 1500 ms grace, knees not required), everything
+   * else is the swing rule (knees required, 500 ms grace).
+   */
+  function gateActivity(): GateActivity {
+    if (activeGame instanceof RefinerGame) {
+      const phase = activeGame.snapshot().phase;
+      if (phase === 'pick') return 'picker';
+      if (phase === 'jumping') return 'refiner-jump';
+      return 'refiner-carry';
+    }
+    return 'swing';
   }
 
   /** Which pose-model state the gate should see for the active source. */
@@ -471,7 +537,7 @@ function main(): void {
     pendingStart = true;
     hubSection.hidden = true;
     stageSection.hidden = false;
-    btnPause.textContent = '⏸ Pause';
+    btnPause.textContent = '🏠 Town';
     loop.start();
   }
 
@@ -493,7 +559,7 @@ function main(): void {
     lastFrameTimestampMs = null;
     lastFrameReceivedMs = null;
     pendingStart = false;
-    // Clearing the pause closes the hub when one was open (manual) and
+    // Clearing the pause closes town when it was open (manual) and
     // resumes the game state; the game itself is already stopped above,
     // so the resume is a no-op for it.
     pause.reset();
@@ -616,16 +682,16 @@ function main(): void {
 
   btnPause.addEventListener('click', () => {
     if (activeGame === null) return;
-    // Spacebar / Pause button toggle a MANUAL pause. During an
-    // auto-pause this converts to manual (opens the hub) instead of
-    // being inert — see PauseController.toggleManual.
+    // The Town button (v3.2): go to town from play, return to the
+    // activity from town. During an auto-pause this converts to town
+    // instead of being inert — see PauseController.toggleManual.
     pause.toggleManual();
   });
   btnRestart.addEventListener('click', () => {
     if (activeGame === null) return;
     activeGame.restart();
-    // Restart clears any pause (and closes the hub when one was open);
-    // the resume event sets the Pause label back.
+    // Restart clears any pause (and closes town when it was open);
+    // the resume event sets the Town label back.
     pause.reset();
     // Restart re-arms the game; if the gate is closed the next update
     // pauses it again until a usable body returns, so no simulation runs
@@ -645,6 +711,10 @@ function main(): void {
   // The debug toggle is video-independent: D / this button only show or
   // hide the debug HUD. The camera video has its own toggle below.
   btnDebug.textContent = showDebug ? '🔍 Debug: On' : '🔍 Debug: Off';
+  // The Town button (v3.2): index.html still ships the old "⏸ Pause"
+  // static label — the coordinator updates it there; this overwrites
+  // it at startup so the live label is never "Pause".
+  btnPause.textContent = '🏠 Town';
   btnVideo.addEventListener('click', () => {
     showVideo = !showVideo;
     btnVideo.textContent = showVideo ? '📷 Hide Camera' : '📷 Show Camera';
@@ -744,9 +814,9 @@ function main(): void {
     if (key === 'q' && activeSource === mouse) mouse.setKeyArmAngled('left', true);
     if (key === 'e' && activeSource === mouse) mouse.setKeyArmAngled('right', true);
     if (key === ' ' && activeGame !== null) {
-      // The hub owns Space while it is open: it closes + resumes
-      // (via onResume), so the toggle below must NOT also fire —
-      // two toggles would land straight back in a manual pause.
+      // The hub owns Space while it is open: it leaves town + returns
+      // (via onLeaveTown), so the toggle below must NOT also fire —
+      // two toggles would land straight back in town.
       // `event.key` (not the lowercased `key`) is what the hub
       // expects: it matches ' ' / 'Escape' exactly.
       if (townHub.isOpen) {
@@ -754,7 +824,7 @@ function main(): void {
         townHub.handleKey(event.key);
         return;
       }
-      // Spacebar is the pause toggle everywhere (v3.1): it used to be
+      // Spacebar is the town toggle everywhere (v3.1): it used to be
       // the mouse-sim jump key, which now lives on W. `event.repeat`
       // is filtered above, so holding Space cannot toggle repeatedly.
       // preventDefault stops the page scrolling on the toggle.
@@ -810,7 +880,13 @@ function main(): void {
       // and the model state. While gated the simulation never advances.
       // frameAgeMs is the age of the last DISTINCT frame received, so a
       // frozen feed closes the gate even when the last frame looked fine.
-      const gateOptions: GateOptions = { gracePeriodMs: GATE.gracePeriodMs };
+      // Per-activity gate (v3.2): the active activity's requirements
+      // (knees + grace) travel with the evaluation. The picker passes
+      // null requirements, so evaluateGate returns open and the gate
+      // never pauses or draws over the chips.
+      const gateOptions: GateOptions = {
+        requirements: gateRequirementsFor(gateActivity()),
+      };
       if (lastFrameReceivedMs !== null) {
         gateOptions.frameAgeMs = nowMs - lastFrameReceivedMs;
       }
@@ -828,9 +904,9 @@ function main(): void {
       applyGate(gate);
       if (gate.gated) return;
       if (pendingStart && pause.kind === 'none') {
-        // A manual pause before the first start defers the start: the
+        // Going to town before the first start defers the start: the
         // game must not start (and un-pause itself via start()) while
-        // the player is sitting in the hub. Resuming starts it on the
+        // the player is sitting in town. Returning starts it on the
         // next update.
         activeGame.start();
         pendingStart = false;
@@ -856,6 +932,23 @@ function main(): void {
 
       // Fixed landscape stage, ALWAYS — never the video's intrinsic size.
       syncCanvasBackingStore(canvas, STAGE.width, STAGE.height);
+
+      // Town is a PLACE, not a pause menu (v3.2): while the hub is
+      // open the game is NOT drawn at all — no stage background, no
+      // video, no avatar, no game, no gate overlay, no debug HUD.
+      // The hub paints its own fully opaque screen. The pose frame
+      // above was still fetched, so tracking stays warm and the
+      // gate state stays current while the player is in town.
+      if (townHub.isOpen) {
+        townHub.render(context, nowMs);
+        // The HUD below the canvas is DOM, not game drawing: keep it
+        // live so it names the activity town will return to (after a
+        // swap it shows the restored game, not the one left behind).
+        if (activeGame !== null) {
+          gameHud.innerHTML = activeGame.hudHtml();
+        }
+        return;
+      }
 
       // Video is hidden by default: stage background + avatar only.
       // Shown letterboxed only while the calibration toggle is on.
@@ -890,27 +983,49 @@ function main(): void {
       // Blocking overlay on the stage itself when gated: model failure
       // says so loudly (never the "step back" message), otherwise the
       // framing message + ghost outline. Never drawn when the gate is open,
-      // and never drawn over a manual pause — the manual overlay below
-      // (or the hub) owns that surface.
+      // and never drawn while the player is in town — town owns that
+      // surface (the early return above), so this never overlaps it.
+      // v3.2: when an activity screen is up and the body is simply
+      // lost (not a model problem), a small top banner replaces the
+      // full dim + ghost — the overlay used to cover the recipe
+      // picker, the tier chips and "Leave to town" (t4). The banner
+      // shows the gate's message, which now names the missing
+      // landmarks ("I can't see your knees — step back").
       if (activeGame !== null && currentGate.gated && pause.kind !== 'manual') {
         const isModel = currentGate.reason !== 'no-body';
-        drawBlockingOverlay(context, canvas.width, canvas.height, {
-          title:
-            !isModel && pause.kind === 'auto'
-              ? 'Step back into frame'
-              : currentGate.message,
-          subtitle: isModel
-            ? ''
-            : 'Arms out wide — shoulders and hips in view',
-          showGhost: !isModel,
-        });
+        if (
+          shouldShowGateBanner({
+            reason: currentGate.reason,
+            activityScreenUp: !townHub.isOpen,
+          })
+        ) {
+          drawGateBanner(
+            context,
+            canvas.width,
+            canvas.height,
+            currentGate.message,
+          );
+        } else {
+          drawBlockingOverlay(context, canvas.width, canvas.height, {
+            title:
+              !isModel && pause.kind === 'auto'
+                ? 'Step back into frame'
+                : currentGate.message,
+            subtitle: isModel
+              ? ''
+              : 'Arms out wide — shoulders and hips in view',
+            showGhost: !isModel,
+          });
+        }
       }
 
       // Manual pause surface (v3.1): the game is paused by the player,
       // not the gate, so the gate overlay above does not apply. Until
-      // Worker B's town-hub overlay registers (registerHubOverlay),
-      // the canvas says which kind of pause this is; once the hub is
-      // registered it owns the surface and this stays out of the way.
+      // a town-hub overlay registers (registerHubOverlay), the canvas
+      // says which kind of pause this is; once the hub is registered
+      // it owns the surface and this stays out of the way. This is
+      // the no-hub fallback only — with the hub registered, town is
+      // drawn by the early return above and this never runs.
       if (activeGame !== null && pause.kind === 'manual' && hubOverlay === null) {
         drawBlockingOverlay(context, canvas.width, canvas.height, {
           title: 'Paused — press Space to resume',
@@ -919,19 +1034,19 @@ function main(): void {
         });
       }
 
-      // Town hub (v3.1): the manual-pause screen, drawn on top of the
-      // paused game. The fallback above stands down once the hub is
-      // registered, so only one of them ever draws.
-      if (townHub.isOpen) {
-        townHub.render(context, nowMs);
-      }
-
       // Live body indicator (DOM, readable on a phone): green when a
       // usable body is in frame, red when gated. The old code hid the
       // warning exactly when there was no body at all — backwards.
       if (activeGame !== null) {
         outOfFrame.hidden = false;
-        if (currentGate.reason === 'model-failed') {
+        if (
+          activeGame instanceof RefinerGame &&
+          activeGame.snapshot().phase === 'pick'
+        ) {
+          // Picker (v3.2): no body needed and no gate — the indicator
+          // must not claim a body is found when none is in frame.
+          outOfFrame.hidden = true;
+        } else if (currentGate.reason === 'model-failed') {
           outOfFrame.textContent =
             '❌ Pose model failed to load — check your connection and reload.';
           outOfFrame.classList.remove('ok');

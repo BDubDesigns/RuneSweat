@@ -11,8 +11,10 @@ import {
   nodeCenterForBody,
   nodeRadiiForStage,
   pickaxeAnchorForBody,
+  respawnBarRect,
   shakeOffsetPx,
   SwingLabGame,
+  swingInstruction,
   xpIntoLevel,
 } from './swingLab';
 
@@ -924,5 +926,290 @@ describe('SwingLabGame render: shake settles, HUD never moves (v3.1)', () => {
       expect(at.x).toBe(480);
       expect(at.y).toBe(58);
     }
+  });
+});
+
+/**
+ * One instruction surface + banner zones (v3.2, Nov 4 playtest): in
+ * v3.1 the ready line, the tip and the ghost-arc text all overlapped
+ * at the top of the stage (t4); announcements ("Level up!", "Node
+ * broken!") sat mid-stage across the face; the respawn bar sat where
+ * the node broke, over the avatar's legs; the "+15 XP" floater was
+ * bare gold text over the boxers/rock.
+ */
+describe('Swing Lab v3.2: one instruction surface + banner zones', () => {
+  /**
+   * Recording stub that tracks the transform: save/restore keep a
+   * stack, translate accumulates, and fillText / fillRect record
+   * their EFFECTIVE positions — so a floater drawn inside the shake
+   * transform still reports where it lands on screen.
+   */
+  function recordingContext(): {
+    ctx: CanvasRenderingContext2D;
+    fillTexts: { text: string; x: number; y: number }[];
+    strokeTexts: { text: string; x: number; y: number }[];
+    fills: { x: number; y: number; w: number; h: number; style: string }[];
+  } {
+    const fillTexts: { text: string; x: number; y: number }[] = [];
+    const strokeTexts: { text: string; x: number; y: number }[] = [];
+    const fills: {
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      style: string;
+    }[] = [];
+    let fillStyle = '';
+    let tx = 0;
+    let ty = 0;
+    const stack: { x: number; y: number }[] = [];
+    const target: Record<string, unknown> = {};
+    const stub = new Proxy(target, {
+      get: (_t, prop) => {
+        if (prop === 'canvas') return { width: 960, height: 540 };
+        if (prop === 'save') {
+          return () => {
+            stack.push({ x: tx, y: ty });
+          };
+        }
+        if (prop === 'restore') {
+          return () => {
+            const prev = stack.pop();
+            if (prev !== undefined) {
+              tx = prev.x;
+              ty = prev.y;
+            }
+          };
+        }
+        if (prop === 'translate') {
+          return (x: number, y: number) => {
+            tx += x;
+            ty += y;
+          };
+        }
+        if (prop === 'fillText') {
+          return (text: string, x: number, y: number) => {
+            fillTexts.push({ text, x: x + tx, y: y + ty });
+          };
+        }
+        if (prop === 'strokeText') {
+          return (text: string, x: number, y: number) => {
+            strokeTexts.push({ text, x: x + tx, y: y + ty });
+          };
+        }
+        if (prop === 'fillRect') {
+          return (x: number, y: number, w: number, h: number) => {
+            fills.push({ x: x + tx, y: y + ty, w, h, style: fillStyle });
+          };
+        }
+        if (prop === 'measureText') {
+          return (text: string) => ({ width: text.length * 11 });
+        }
+        return () => undefined;
+      },
+      set: (t, prop, value) => {
+        if (prop === 'fillStyle') fillStyle = String(value);
+        t[prop as string] = value;
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx: stub, fillTexts, strokeTexts, fills };
+  }
+
+  function setup() {
+    const mouse = new MouseSource();
+    const tracker = new BodyStateTracker();
+    const game = new SwingLabGame(new SoundEffects());
+    mouse.start(0);
+    game.start();
+    return { mouse, tracker, game };
+  }
+
+  function step(
+    ctx: ReturnType<typeof setup>,
+    fromMs: number,
+    toMs: number,
+  ): void {
+    for (let t = fromMs + 16; t <= toMs; t += 16) {
+      const frame = ctx.mouse.frameAt(t);
+      if (frame === null) continue;
+      const body = ctx.tracker.update(frame);
+      ctx.game.update(16, t, body, frame.landmarks);
+    }
+  }
+
+  function doSwing(ctx: ReturnType<typeof setup>, t: number): number {
+    ctx.mouse.setKeyArm('left', true);
+    ctx.mouse.setKeyArm('right', true);
+    step(ctx, t, t + 500);
+    ctx.mouse.setKeyArm('left', false);
+    ctx.mouse.setKeyArm('right', false);
+    step(ctx, t + 500, t + 900);
+    return t + 900;
+  }
+
+  /** Swing `count` times, waiting out cooldowns + respawn waits. */
+  function doSwings(ctx: ReturnType<typeof setup>, count: number): number {
+    let t = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (i > 0 && ctx.game.snapshot().nodeGone) {
+        step(ctx, t, t + 3600);
+        t += 3600;
+      }
+      t = doSwing(ctx, t);
+      step(ctx, t, t + 800);
+      t += 800;
+    }
+    return t;
+  }
+
+  /** Body at `t` (or the arms-down rest body when the sim is idle). */
+  function bodyAt(ctx: ReturnType<typeof setup>, t: number): BodyState {
+    const frame = ctx.mouse.frameAt(t);
+    if (frame === null) throw new Error('sim produced no frame');
+    return ctx.tracker.update(frame);
+  }
+
+  it('the instruction lives in the HUD only; the canvas keeps just the short phase banner', () => {
+    const ctx = setup();
+    const rec = recordingContext();
+    const body = bodyAt(ctx, 16);
+    ctx.game.render(rec.ctx, 16, body, null);
+    const canvasTexts = [
+      ...rec.fillTexts.map((x) => x.text),
+      ...rec.strokeTexts.map((x) => x.text),
+    ].join('\n');
+    const instruction = swingInstruction('ready', null);
+    expect(instruction).toBe(
+      'Both hands up together, then chop down in front of you!',
+    );
+    // The instruction sentence is nowhere on the canvas...
+    expect(canvasTexts).not.toContain(instruction);
+    // ...and neither is the old tip line.
+    expect(canvasTexts).not.toContain('Tip:');
+    // ...and the ghost arc lost its label too.
+    expect(canvasTexts).not.toContain('UP TOGETHER');
+    // The canvas banner is the short phase signal, once, at y 58.
+    const banner = rec.fillTexts.filter((x) => x.y === 58);
+    expect(banner).toHaveLength(1);
+    expect(banner[0]?.text).toBe('⛏️ Ready');
+    // The HUD carries the instruction exactly once.
+    const hud = ctx.game.hudHtml();
+    expect(hud.split(instruction).length - 1).toBe(1);
+  });
+
+  it('the meter lost its UP label (it overlapped the phase banner); SWING/DOWN clear it', () => {
+    const ctx = setup();
+    const rec = recordingContext();
+    ctx.game.render(rec.ctx, 16, bodyAt(ctx, 16), null);
+    const texts = rec.fillTexts.map((x) => x.text);
+    expect(texts).not.toContain('⬆ UP');
+    const swing = rec.fillTexts.find((x) => x.text === 'SWING');
+    expect(swing?.y).toBe(112);
+    const down = rec.fillTexts.find((x) => x.text === '⬇ DOWN');
+    expect(down?.y).toBe(468);
+    // The phase banner (y 58, ~15px half-height) clears the SWING
+    // title (y 112) by a wide margin.
+    expect((swing?.y ?? 0) - 58).toBeGreaterThanOrEqual(30);
+  });
+
+  it('announcements go to the banner zone at the top, never mid-stage', () => {
+    const ctx = setup();
+    // 5 hits break the node...
+    const tBreak = doSwings(ctx, 5);
+    expect(ctx.game.snapshot().nodesBroken).toBe(1);
+    const recBreak = recordingContext();
+    ctx.game.render(recBreak.ctx, tBreak, bodyAt(ctx, tBreak), null);
+    const broken = recBreak.fillTexts.find((x) =>
+      x.text.startsWith('⛏️ Node broken!'),
+    );
+    expect(broken).toBeDefined();
+    expect(broken?.y).toBe(58);
+    expect(broken?.x).toBe(480);
+    // ...and 7 hits level up. A fresh store first: the inventory is
+    // the cross-session source of truth, so a second game in one
+    // test would otherwise start at the first game's 75 XP and level
+    // up on its 2nd swing, long before this render.
+    inventory.reset();
+    const ctx2 = setup();
+    const tLevel = doSwings(ctx2, 7);
+    expect(ctx2.game.snapshot().level).toBe(2);
+    const recLevel = recordingContext();
+    ctx2.game.render(recLevel.ctx, tLevel, bodyAt(ctx2, tLevel), null);
+    const level = recLevel.fillTexts.find((x) =>
+      x.text.startsWith('Level up!'),
+    );
+    expect(level).toBeDefined();
+    expect(level?.y).toBe(58);
+    expect(level?.text).toBe('Level up! Mining Lv 2!');
+  });
+
+  it('the respawn bar sits bottom-left, clear of the avatar, chips and meter', () => {
+    const ctx = setup();
+    const t = doSwings(ctx, 5);
+    expect(ctx.game.snapshot().nodeGone).toBe(true);
+    const rec = recordingContext();
+    ctx.game.render(rec.ctx, t, bodyAt(ctx, t), null);
+    const label = rec.fillTexts.find((x) =>
+      x.text.startsWith('⛏️ New node in'),
+    );
+    expect(label).toBeDefined();
+    // Bottom zone, left zone: x centred on the 320-wide bar at x 12.
+    expect(label?.x).toBe(12 + 320 / 2);
+    expect(label?.y).toBeGreaterThanOrEqual(540 - 38);
+    expect(label?.y).toBeLessThan(540);
+    // The bar rect is the exported zone, and it ends well before the
+    // tier chips (bottom-right, x >= 960 - 330 - 12 = 618).
+    const bar = respawnBarRect(960, 540);
+    expect(bar).toEqual({ x: 12, y: 502, w: 320, h: 26 });
+    expect(bar.x + bar.w).toBeLessThan(618);
+    const track = rec.fills.find(
+      (f) => f.x === bar.x && f.y === bar.y && f.w === bar.w && f.h === bar.h,
+    );
+    expect(track).toBeDefined();
+  });
+
+  it('the +XP floater sits right of the node with a dark pill behind it', () => {
+    const ctx = setup();
+    const t = doSwing(ctx, 0);
+    expect(ctx.game.snapshot().swings).toBe(1);
+    // Render 400 ms after the swing ends: the shake (250 ms) is
+    // over, the floater (900 ms) is still alive.
+    const renderMs = t + 400;
+    const body = bodyAt(ctx, renderMs);
+    const rec = recordingContext();
+    ctx.game.render(rec.ctx, renderMs, body, null);
+    const floater = rec.fillTexts.find((x) => x.text === '+15 XP');
+    expect(floater).toBeDefined();
+    const node = nodeCenterForBody(body, 960, 540);
+    // Right of the node (node right edge = centre + radius), clear
+    // of the torso behind the rock.
+    expect(floater?.x ?? 0).toBeGreaterThan(node.x + node.rx);
+    // A solid dark pill covers the text position.
+    const pill = rec.fills.find(
+      (f) =>
+        f.style === '#14141f' &&
+        (floater?.x ?? 0) >= f.x &&
+        (floater?.x ?? 0) <= f.x + f.w &&
+        (floater?.y ?? 0) >= f.y &&
+        (floater?.y ?? 0) <= f.y + f.h,
+    );
+    expect(pill).toBeDefined();
+  });
+
+  it('swingInstruction merges ready + tip and reports handedness on recover', () => {
+    expect(swingInstruction('ready', null)).toBe(
+      'Both hands up together, then chop down in front of you!',
+    );
+    expect(swingInstruction('windup', null)).toBe(
+      'Chop straight down in front of you — through waist height!',
+    );
+    expect(swingInstruction('strike', null)).toBe('Chop through to the node!');
+    expect(
+      swingInstruction('recover', {
+        kind: 'hit',
+        handedness: 'two-handed',
+      } as never),
+    ).toBe('Two-handed! Hands up for the next swing!');
   });
 });

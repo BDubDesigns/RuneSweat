@@ -13,7 +13,10 @@
  * canvas vector shapes — no external art assets, nothing new to fetch.
  *
  * Draw order: far arm, far leg, torso (top), bottoms, near leg, near
- * arm, head + hat. No body (landmarks null or incomplete): draws nothing.
+ * arm, head: skin circle, then the hat, then the face. The hat goes
+ * BEFORE the face on purpose (v3.2): v3.1 drew the eyes first and the
+ * hard-hat dome over them, so every playtest frame showed a smile and
+ * no eyes. The face sits in the visible band below the brim.
  *
  * Canvas drawing itself is untestable in Node — the pure geometry
  * helpers below (`avatarJoints`, `limbWidthPx`, `headRadiusPx`,
@@ -145,6 +148,69 @@ export function headGeometry(
     cx,
     cy: shoulderY - headR * AVATAR.headCentreAboveNeckHeadFrac,
     r: headR,
+  };
+}
+
+/** Canvas-space hard-hat geometry for a head circle. */
+export interface HardHatGeometry {
+  /** Y of the dome centre (the dome is drawn from this point up). */
+  topY: number;
+  /** Dome radius. */
+  domeRadius: number;
+  /**
+   * Bottom edge of the brim ellipse. Everything above this line is
+   * under the hat: the brim is `0.16r` tall, centred on `topY`, so
+   * the brim bottom sits at `cy + 0.04r`.
+   */
+  brimBottomY: number;
+}
+
+/**
+ * Pure: hard-hat geometry for a head circle. The dome is centred
+ * `0.12r` above the head centre with radius `1.02r`, so it covers
+ * everything within a head-radius of that point — including where
+ * v3.1 put the eyes (`cy - 0.3r`, `0.42r` from the dome centre).
+ */
+export function hardHatGeometry(head: HeadGeometry): HardHatGeometry {
+  const topY = head.cy - head.r * 0.12;
+  return {
+    topY,
+    domeRadius: head.r * 1.02,
+    brimBottomY: topY + head.r * 0.16,
+  };
+}
+
+/** Canvas-space face geometry for a head circle. */
+export interface FaceGeometry {
+  /** Y of the eye centres. */
+  eyeY: number;
+  /** Eye dot radius. */
+  eyeRadius: number;
+  /** Horizontal offset of each eye from the face centre. */
+  eyeDX: number;
+  /** Y of the smile arc centre. */
+  smileY: number;
+  /** Smile arc radius. */
+  smileRadius: number;
+}
+
+/**
+ * Pure: face geometry for a head circle (v3.2). The eyes sit BELOW
+ * the brim (`cy + 0.32r`, brim bottom is `cy + 0.04r`) in the visible
+ * face band, which runs from the brim to the chin at `cy + r`. Eye
+ * radius is `0.15r` — v3.1's `0.09r` was ~7 px across at laptop size
+ * and unreadable at phone size; `0.15r` is ~12 px across on the sim
+ * body and still small enough not to look googly. The smile sits
+ * below the eyes (`cy + 0.55r`, bottom at `cy + 0.85r`), clear of
+ * both the eyes and the chin.
+ */
+export function faceGeometry(head: HeadGeometry): FaceGeometry {
+  return {
+    eyeY: head.cy + head.r * 0.32,
+    eyeRadius: head.r * 0.15,
+    eyeDX: head.r * 0.36,
+    smileY: head.cy + head.r * 0.55,
+    smileRadius: head.r * 0.3,
   };
 }
 
@@ -418,13 +484,16 @@ export class AvatarRenderer {
   }
 
   /**
-   * Head: skin circle, two dot eyes + a small smile, then the hat. The
-   * circle comes from `headGeometry` — big (0.24 torso lengths) and
-   * sitting on the neck, chin overlapping the torso top. The face is
-   * drawn relative to the head centre, NOT the nose landmark: the nose
-   * rides ~0.3 torso lengths above the shoulders, so nose-anchored
-   * eyes would sit at the top rim of the bigger, lower head. `nose.x`
-   * still centres the face horizontally.
+   * Head: skin circle, then the hat, then the face. The hat goes on
+   * BEFORE the face (v3.2): v3.1 drew dot eyes at `cy - 0.3r` and
+   * then painted the hard-hat dome over them, so every playtest
+   * frame showed a smile and no eyes. The eyes now sit below the
+   * brim (see `faceGeometry`) in the visible face band, and are
+   * drawn after the hat, so nothing can cover them. The face is
+   * drawn relative to the head centre, NOT the nose landmark: the
+   * nose rides ~0.3 torso lengths above the shoulders, so
+   * nose-anchored eyes would sit at the top rim of the bigger,
+   * lower head. `nose.x` still centres the face horizontally.
    */
   private drawHead(
     ctx: CanvasRenderingContext2D,
@@ -437,24 +506,25 @@ export class AvatarRenderer {
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.fill();
-    // Friendly face: dot eyes above the head centre, small smile below it.
+    // Hat first — the dome covers the top of the head, and the face
+    // must land on top of it, not under it.
+    if (outfit.hat.style === 'hard-hat') {
+      this.drawHardHat(ctx, cx, cy, r, outfit.hat.color);
+    }
+    // Friendly face: dot eyes below the brim, small smile below them.
+    const face = faceGeometry({ cx, cy, r });
     ctx.fillStyle = '#26221f';
-    const eyeDX = r * 0.38;
-    const eyeY = cy - r * 0.3;
-    for (const ex of [j.nose.x - eyeDX, j.nose.x + eyeDX]) {
+    for (const ex of [j.nose.x - face.eyeDX, j.nose.x + face.eyeDX]) {
       ctx.beginPath();
-      ctx.arc(ex, eyeY, r * 0.09, 0, Math.PI * 2);
+      ctx.arc(ex, face.eyeY, face.eyeRadius, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.strokeStyle = '#26221f';
     ctx.lineWidth = Math.max(2, r * 0.06);
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.arc(j.nose.x, cy + r * 0.25, r * 0.32, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.arc(j.nose.x, face.smileY, face.smileRadius, 0.15 * Math.PI, 0.85 * Math.PI);
     ctx.stroke();
-    if (outfit.hat.style === 'hard-hat') {
-      this.drawHardHat(ctx, cx, cy, r, outfit.hat.color);
-    }
   }
 
   /** The yellow hard hat from the old helmet drawing, scaled to the head. */
@@ -465,19 +535,19 @@ export class AvatarRenderer {
     headR: number,
     color: string,
   ): void {
-    const topY = cy - headR * 0.12;
+    const hat = hardHatGeometry({ cx, cy, r: headR });
     ctx.fillStyle = color;
     ctx.strokeStyle = '#d9a441';
     ctx.lineWidth = 2;
     // Dome.
     ctx.beginPath();
-    ctx.arc(cx, topY, headR * 1.02, Math.PI, 0);
+    ctx.arc(cx, hat.topY, hat.domeRadius, Math.PI, 0);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
     // Brim.
     ctx.beginPath();
-    ctx.ellipse(cx, topY, headR * 1.32, headR * 0.16, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx, hat.topY, headR * 1.32, headR * 0.16, 0, 0, Math.PI * 2);
     ctx.fill();
   }
 }

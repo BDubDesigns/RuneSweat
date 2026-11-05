@@ -142,6 +142,21 @@ export function nodeCenterForBody(
 }
 
 /**
+ * Respawn bar rect for a stage (v3.2): bottom-left, 320 x 26, 12 px
+ * from the left edge and 38 px from the bottom. Clear of the avatar
+ * (centre), the tier chips (bottom-right, x >= width - 342) and the
+ * swing meter's DOWN label (y = top + h + 28 = 468 on a 540 stage).
+ * Pure, so tests can assert the zone without a canvas.
+ */
+export function respawnBarRect(
+  width: number,
+  height: number,
+): { x: number; y: number; w: number; h: number } {
+  void width;
+  return { x: 12, y: height - 38, w: 320, h: 26 };
+}
+
+/**
  * Pickaxe anchor + handle direction for a body, canvas space. The
  * pickaxe is gripped in the RIGHT hand at all times: the anchor is the
  * right wrist (mirrored through `toCanvas`), and the handle runs along
@@ -314,12 +329,44 @@ export interface SwingLabSnapshot {
   nodePieces: number;
 }
 
+/**
+ * Canvas phase banner (v3.2): a SHORT phase signal at the top of the
+ * stage (y 58), never the instruction sentence. The instruction lives
+ * in the HUD only (`swingInstruction`) — in v3.1 the ready line AND
+ * the tip AND the ghost-arc text all overlapped at the top of the
+ * stage (t4), and the 34 px ready sentence was wider than the stage.
+ */
 const PHASE_LINES: Record<SwingPhase, string> = {
-  ready: 'Both hands up together, then chop down in front of you!',
-  windup: 'Now SWING DOWN! ⬇️',
-  strike: 'STRIKE! ⛏️',
+  ready: '⛏️ Ready',
+  windup: 'SWING DOWN! ⬇️',
+  strike: 'STRIKE!',
   recover: '⛏️ HIT!',
 };
+
+/**
+ * The instruction for a phase — the single instruction surface, shown
+ * in the HUD (`hudHtml`) and nowhere on the canvas. Ready + tip are
+ * merged into one line (v3.2): the tip ("hands together overhead,
+ * then chop straight down") only restated the ready line.
+ */
+export function swingInstruction(
+  phase: SwingPhase,
+  lastEvent: SwingEvent | null,
+): string {
+  switch (phase) {
+    case 'ready':
+      return 'Both hands up together, then chop down in front of you!';
+    case 'windup':
+      return 'Chop straight down in front of you — through waist height!';
+    case 'strike':
+      return 'Chop through to the node!';
+    case 'recover':
+      if (lastEvent !== null && lastEvent.kind === 'hit') {
+        return `${HANDEDNESS_LABELS[lastEvent.handedness]} Hands up for the next swing!`;
+      }
+      return 'Hands up for the next swing!';
+  }
+}
 
 const HANDEDNESS_LABELS: Record<SwingHandedness, string> = {
   'two-handed': 'Two-handed!',
@@ -365,11 +412,6 @@ export class SwingLabGame implements Game {
    * until `breakAtMs + BREAK.respawnMs`, then fades back in.
    */
   private breakAtMs = 0;
-  /**
-   * Where the node broke (canvas space): pieces fall from here and the
-   * respawn bar sits here, even if the player moves mid-wait.
-   */
-  private breakPos: { x: number; y: number } | null = null;
   /** Latest clock reading, so `snapshot()` can report gone/progress. */
   private lastNowMs = 0;
   /** Current screen-shake amplitude in px (bigger right after a hit). */
@@ -415,9 +457,10 @@ export class SwingLabGame implements Game {
     const tier = tierById(tierId);
     if (tier === undefined) return false;
     if (!tierUnlocked(tier, miningLevel(this.xp))) {
+      const pos = this.floaterPos();
       this.floaters.push({
-        x: this.lastWidth / 2,
-        y: this.lastHeight * 0.3,
+        x: pos.x,
+        y: pos.y,
         text: `🔒 ${tierLockMessage(tier)}`,
         untilMs: nowMs + SWING.floaterMs,
       });
@@ -508,7 +551,6 @@ export class SwingLabGame implements Game {
       nowMs >= this.breakAtMs + BREAK.respawnMs + BREAK.fadeInMs
     ) {
       this.breakAtMs = 0;
-      this.breakPos = null;
     }
   }
 
@@ -559,11 +601,11 @@ export class SwingLabGame implements Game {
     // HUD — never shaken.
     this.drawSwingMeter(ctx, snap, nowMs);
     this.drawTierChips(ctx, width, height);
-    this.drawPhaseText(ctx, snap, width, body);
+    this.drawPhaseText(ctx, snap, width, nowMs);
     if (snap.phase === 'ready' && this.swings === 0) {
       this.drawGhostArc(ctx, width, height);
     }
-    this.drawBanners(ctx, nowMs, width, height);
+    this.drawBanners(ctx, nowMs, width);
     if (gone) this.drawRespawnBar(ctx, nowMs);
   }
 
@@ -609,13 +651,22 @@ export class SwingLabGame implements Game {
     const oreImg =
       `<img src="${assetUrl(tier.oreImage)}" alt="${tier.name}" ` +
       `style="height:1.3em;vertical-align:-0.25em">`;
+    // The instruction lives HERE and nowhere on the canvas (v3.2):
+    // one line, merged ready + tip. The facing hint rides along when
+    // the machine sees the body sideways — it used to be a third
+    // canvas line across the face.
+    let instruction = swingInstruction(snap.phase, snap.lastEvent);
+    if (this.snapshotFacingOk(snap) === false) {
+      instruction += " Face the camera — I can't see you from the side.";
+    }
     return (
       `<span>⛏️ Mining Lv ${level} — ${xpIntoLevel(this.xp)}/${SWING.xpPerLevel} XP</span> &nbsp; ` +
       `<span>${oreImg} Ore ${this.ore} · ${tier.name}</span> &nbsp; ` +
       `<span>💰 ${inventory.credits} cr</span> &nbsp; ` +
       `<span>Swings ${this.swings}</span> &nbsp; ` +
       `<span>Node ${this.nodeHits}/${SWING.hitsPerNode}</span> &nbsp; ` +
-      `<span>Phase: ${snap.phase} · L ${snap.leftVel.toFixed(1)} R ${snap.rightVel.toFixed(1)} torso/s</span>`
+      `<span>Phase: ${snap.phase} · L ${snap.leftVel.toFixed(1)} R ${snap.rightVel.toFixed(1)} torso/s</span> &nbsp; ` +
+      `<span>${instruction}</span>`
     );
   }
 
@@ -666,7 +717,6 @@ export class SwingLabGame implements Game {
     this.oreDrops = [];
     this.nodePieces = [];
     this.breakAtMs = 0;
-    this.breakPos = null;
     this.shakeAmpPx = SWING.shakePx * 2;
     // A fresh game starts at Mining 1, so it starts on the level 1 mine:
     // Galvanite would be locked at this level anyway.
@@ -708,10 +758,10 @@ export class SwingLabGame implements Game {
     this.flashUntilMs = nowMs + 200;
     this.spawnDebris(nowMs);
     this.spawnOreDrop(nowMs);
-    const { x, y } = this.nodeCenter();
+    const pos = this.floaterPos();
     this.floaters.push({
-      x,
-      y: y - 95,
+      x: pos.x,
+      y: pos.y,
       text: `+${this.activeTier.xpPerHit} XP`,
       untilMs: nowMs + SWING.floaterMs,
     });
@@ -736,7 +786,6 @@ export class SwingLabGame implements Game {
   private breakNode(nowMs: number): void {
     const { x, y, rx, ry } = this.nodeCenter();
     this.breakAtMs = nowMs;
-    this.breakPos = { x, y };
     const colors = ['#8d7d6b', '#5d5145', '#6b5d4f', this.activeTier.crystalColor];
     for (let i = 0; i < BREAK.pieceCount; i += 1) {
       // Mostly upward/outward, then gravity takes them down off-screen.
@@ -782,6 +831,19 @@ export class SwingLabGame implements Game {
 
   private nodeCenter(): NodeGeometry {
     return nodeCenterForBody(this.lastBody, this.lastWidth, this.lastHeight);
+  }
+
+  /**
+   * Floater anchor (v3.2): right of the node, clear of the avatar.
+   * The v3 floater sat above the node centre — over the torso /
+   * boxers, low-contrast (t48). The node is front-centre, so its
+   * right edge is past the torso (shoulder half-width ~0.37 torso
+   * vs node radius 0.22 * min(w, h) ≈ 0.73 torso); the floater rides
+   * there with a dark pill behind it (see `drawFloaters`).
+   */
+  private floaterPos(): { x: number; y: number } {
+    const { x, y, rx } = this.nodeCenter();
+    return { x: x + rx + 40, y: y - 20 };
   }
 
   /** True while the node is gone between break and respawn. */
@@ -1110,37 +1172,40 @@ export class SwingLabGame implements Game {
   }
 
   /**
-   * The respawn wait indicator, drawn where the node broke: a progress
-   * bar filling over `BREAK.respawnMs` with the seconds left above it.
-   * The node is gone while this shows — no mining until it completes.
+   * Respawn bar rect (v3.2): bottom-left of the stage, clear of the
+   * avatar (centre), the tier chips (bottom-right) and the swing
+   * meter (left, ends y 440 + DOWN label at 468). The v3 bar sat
+   * where the node broke — front-centre at waist height, over the
+   * avatar's legs. Pure, so tests can assert the zone.
    */
   private drawRespawnBar(ctx: CanvasRenderingContext2D, nowMs: number): void {
-    const pos = this.breakPos ?? {
-      x: this.lastWidth / 2,
-      y: this.lastHeight * 0.5,
-    };
+    const { x, y, w, h } = respawnBarRect(this.lastWidth, this.lastHeight);
     const progress = this.respawnProgress(nowMs);
-    const w = 280;
-    const h = 22;
-    const x = pos.x - w / 2;
-    const y = pos.y - h / 2;
     const secs = Math.max(
       0,
       Math.ceil((this.breakAtMs + BREAK.respawnMs - nowMs) / 1000),
     );
     ctx.save();
-    ctx.font = `700 22px ${RENDER.gameFont}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#e8e8f0';
-    ctx.fillText(`⛏️ New node in ${secs}…`, pos.x, y - 24);
-    ctx.fillStyle = 'rgba(11, 11, 18, 0.72)';
+    // Track.
+    ctx.fillStyle = '#14141f';
     ctx.fillRect(x, y, w, h);
+    // Fill.
     ctx.fillStyle = '#ffd166';
     ctx.fillRect(x, y, w * progress, h);
     ctx.strokeStyle = 'rgba(232, 232, 240, 0.5)';
     ctx.lineWidth = 2;
     ctx.strokeRect(x, y, w, h);
+    // Countdown text INSIDE the bar (no separate label line above it
+    // to collide with the meter's DOWN label): white with a dark
+    // outline, readable over the dark track and the gold fill alike.
+    ctx.font = `700 20px ${RENDER.gameFont}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.lineWidth = 5;
+    ctx.strokeText(`⛏️ New node in ${secs}…`, x + w / 2, y + h / 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`⛏️ New node in ${secs}…`, x + w / 2, y + h / 2);
     ctx.restore();
   }
 
@@ -1204,15 +1269,22 @@ export class SwingLabGame implements Game {
     ctx.restore();
   }
 
-  /** Vertical windup meter on the left: fills as the wrists rise. */
+  /** Vertical windup meter on the left: fills as the wrists rise.
+   *
+   * v3.2: the meter moved down (top 110 -> 140, height 340 -> 300)
+   * and lost its "⬆ UP" label — the label sat at y 54, exactly
+   * where the phase banner (y 58) runs, so the two overlapped (t4).
+   * "SWING" stays above the meter, "⬇ DOWN" below it; the respawn
+   * bar (bottom-left, y 502..528) clears the DOWN label (y 468).
+   */
   private drawSwingMeter(
     ctx: CanvasRenderingContext2D,
     snap: SwingSnapshot,
     nowMs: number,
   ): void {
     const x = 54;
-    const top = 110;
-    const h = 340;
+    const top = 140;
+    const h = 300;
     const w = 40;
     const progress = clamp(snap.windupProgress, 0, 1);
     const flashing =
@@ -1223,8 +1295,6 @@ export class SwingLabGame implements Game {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#e8e8f0';
     ctx.fillText('SWING', x + w / 2, top - 28);
-    ctx.font = `20px ${RENDER.gameFont}`;
-    ctx.fillText('⬆ UP', x + w / 2, top - 56);
     // Track.
     ctx.fillStyle = 'rgba(11, 11, 18, 0.72)';
     ctx.fillRect(x, top, w, h);
@@ -1264,53 +1334,32 @@ export class SwingLabGame implements Game {
     return typeof value === 'boolean' ? value : undefined;
   }
 
+  /**
+   * Phase banner ONLY (v3.2): one short line at y 58, 30 px so even
+   * the longest label fits the 960 stage. The v3.1 second line (tip /
+   * last-swing) is gone — the instruction lives in the HUD — and so
+   * is the facing hint (also HUD now): both used to sit across the
+   * avatar's face. While a level-up / node-broken announcement is
+   * live it owns this same zone instead (see `drawBanners`), so the
+   * two never stack.
+   */
   private drawPhaseText(
     ctx: CanvasRenderingContext2D,
     snap: SwingSnapshot,
     width: number,
-    body: BodyState | null,
+    nowMs: number,
   ): void {
+    if (this.activeBanner(nowMs) !== null) return;
     const line = PHASE_LINES[snap.phase];
-    const last = snap.lastEvent;
-    const sub =
-      last === null
-        ? 'Tip: hands together overhead, then chop straight down in front of you!'
-        : last.kind === 'hit'
-          ? `Last swing: HIT! ${HANDEDNESS_LABELS[last.handedness]}`
-          : `Last swing: ${last.message}`;
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = `700 34px ${RENDER.gameFont}`;
+    ctx.font = `700 30px ${RENDER.gameFont}`;
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.lineWidth = 6;
     ctx.strokeText(line, width / 2, 58);
     ctx.fillStyle = '#ffffff';
     ctx.fillText(line, width / 2, 58);
-    ctx.font = `24px ${RENDER.gameFont}`;
-    ctx.strokeText(sub, width / 2, 100);
-    ctx.fillStyle = '#e8e8f0';
-    ctx.fillText(sub, width / 2, 100);
-    // Facing hint: the machine can see the body is sideways (shoulders
-    // edge-on). A hint only — the swing still counts if it lands.
-    if (
-      body !== null &&
-      body.present &&
-      this.snapshotFacingOk(snap) === false
-    ) {
-      ctx.font = `700 26px ${RENDER.gameFont}`;
-      ctx.strokeText(
-        "Face the camera — I can't see you from the side",
-        width / 2,
-        142,
-      );
-      ctx.fillStyle = '#ffd166';
-      ctx.fillText(
-        "Face the camera — I can't see you from the side",
-        width / 2,
-        142,
-      );
-    }
     ctx.restore();
   }
 
@@ -1374,13 +1423,18 @@ export class SwingLabGame implements Game {
     ctx.lineTo(cx + 14, botY - 28);
     ctx.closePath();
     ctx.fill();
-    ctx.font = `700 22px ${RENDER.gameFont}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('UP TOGETHER, THEN CHOP DOWN IN FRONT!', cx, topY - 52);
+    // No label on the arc (v3.2): its text sat at y ~99, on the
+    // avatar's hat, under the phase banner and the tip. The phase
+    // banner + HUD instruction say the same thing.
     ctx.restore();
   }
 
+  /**
+   * Floaters ("+15 XP", lock messages): a dark pill behind the text
+   * (v3.2) — the bare gold text was low-contrast over the boxers and
+   * the rock — anchored right of the node (see `floaterPos`), clear
+   * of the avatar. They rise and fade over `SWING.floaterMs`.
+   */
   private drawFloaters(ctx: CanvasRenderingContext2D, nowMs: number): void {
     ctx.save();
     ctx.font = `700 36px ${RENDER.gameFont}`;
@@ -1388,28 +1442,61 @@ export class SwingLabGame implements Game {
     ctx.textBaseline = 'middle';
     for (const f of this.floaters) {
       const age = 1 - (f.untilMs - nowMs) / SWING.floaterMs;
+      const y = f.y - age * 30;
+      const textWidth =
+        typeof ctx.measureText === 'function'
+          ? ctx.measureText(f.text).width
+          : f.text.length * 20;
       ctx.globalAlpha = clamp(1 - age, 0, 1);
+      // Pill behind the text: solid, so the floater reads over any
+      // background (torso, rock, stage).
+      ctx.fillStyle = '#14141f';
+      ctx.fillRect(
+        f.x - textWidth / 2 - 14,
+        y - 26,
+        textWidth + 28,
+        52,
+      );
+      ctx.strokeStyle = '#ffd166';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(
+        f.x - textWidth / 2 - 14,
+        y - 26,
+        textWidth + 28,
+        52,
+      );
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
       ctx.lineWidth = 6;
-      ctx.strokeText(f.text, f.x, f.y - age * 30);
+      ctx.strokeText(f.text, f.x, y);
       ctx.fillStyle = '#ffd166';
-      ctx.fillText(f.text, f.x, f.y - age * 30);
+      ctx.fillText(f.text, f.x, y);
     }
     ctx.restore();
   }
 
+  /** The live announcement (node broken beats level up), or null. */
+  private activeBanner(nowMs: number): string | null {
+    if (nowMs < this.breakBannerUntilMs) {
+      return '⛏️ Node broken! New node!';
+    }
+    if (nowMs < this.levelBannerUntilMs) {
+      return `Level up! Mining Lv ${miningLevel(this.xp)}!`;
+    }
+    return null;
+  }
+
+  /**
+   * Announcements (v3.2): drawn in the phase-banner zone at the top
+   * of the stage (y 58), clear of the head — never mid-stage across
+   * the avatar's face (v3.1: `height / 2 - 60`, t48). While one is
+   * live it replaces the phase banner in the same zone.
+   */
   private drawBanners(
     ctx: CanvasRenderingContext2D,
     nowMs: number,
     width: number,
-    height: number,
   ): void {
-    let text: string | null = null;
-    if (nowMs < this.breakBannerUntilMs) {
-      text = '⛏️ Node broken! New node!';
-    } else if (nowMs < this.levelBannerUntilMs) {
-      text = `Level up! Mining Lv ${miningLevel(this.xp)}!`;
-    }
+    const text = this.activeBanner(nowMs);
     if (text === null) return;
     ctx.save();
     ctx.textAlign = 'center';
@@ -1417,9 +1504,9 @@ export class SwingLabGame implements Game {
     ctx.font = `700 40px ${RENDER.gameFont}`;
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.lineWidth = 7;
-    ctx.strokeText(text, width / 2, height / 2 - 60);
+    ctx.strokeText(text, width / 2, 58);
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(text, width / 2, height / 2 - 60);
+    ctx.fillText(text, width / 2, 58);
     ctx.restore();
   }
 }

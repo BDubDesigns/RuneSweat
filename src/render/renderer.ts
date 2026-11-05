@@ -121,7 +121,94 @@ export function drawBlockingOverlay(
   ctx.restore();
 }
 
-/** Fill the stage when there is no video (sim / replay mode). */
+/**
+ * Gate banner geometry (v3.2): a small pill at the very top of the
+ * stage — no dim, no ghost. It must clear the game title / phase
+ * banner below it (drawn at y 58, glyph tops ~y 41), so the pill
+ * bottom (top + height = 40) sits 1 px above that line, and it must
+ * clear the recipe-picker cards (top y 140) by a wide margin.
+ */
+export const GATE_BANNER = {
+  /** Pill top edge, px from the stage top. */
+  top: 6,
+  /** Pill height in px. */
+  height: 34,
+  /** Horizontal padding inside the pill, each side, in px. */
+  paddingX: 18,
+  /** Minimum pill width in px (short messages still read as a banner). */
+  minWidth: 220,
+  /** Text size in px. */
+  fontPx: 20,
+} as const;
+
+/** Canvas-space rect of the gate banner pill for `message`. */
+export interface GateBannerRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Pure: the pill rect for a message of `textWidthPx` (measured with
+ * `ctx.measureText`, or estimated). Centred, capped to the stage with
+ * a 12 px margin each side so a long message can never run off the
+ * stage — the pill grows, the stage never scrolls.
+ */
+export function gateBannerRect(
+  width: number,
+  textWidthPx: number,
+): GateBannerRect {
+  const w = Math.min(
+    Math.max(
+      textWidthPx + GATE_BANNER.paddingX * 2,
+      GATE_BANNER.minWidth,
+    ),
+    width - 24,
+  );
+  return {
+    x: (width - w) / 2,
+    y: GATE_BANNER.top,
+    w,
+    h: GATE_BANNER.height,
+  };
+}
+
+/**
+ * Small top banner for a lost body while an activity screen is up
+ * (v3.2): an opaque pill with the gate message, nothing else. No dim
+ * rect, no framing ghost — the picker, tier chips and "Leave to town"
+ * stay visible and tappable underneath it. See `shouldShowGateBanner`
+ * in `core/gate.ts` for when the hub uses this instead of
+ * `drawBlockingOverlay`.
+ */
+export function drawGateBanner(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  message: string,
+): void {
+  const textWidth =
+    typeof ctx.measureText === 'function'
+      ? ctx.measureText(message).width
+      : message.length * (GATE_BANNER.fontPx * 0.55);
+  const rect = gateBannerRect(width, textWidth);
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // Solid card colour, never translucent: the banner sits over live
+  // game art and must read at a glance.
+  ctx.fillStyle = '#1f1f33';
+  ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+  ctx.strokeStyle = '#ffd166';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+  ctx.font = `700 ${GATE_BANNER.fontPx}px ${RENDER.gameFont}`;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(message, width / 2, rect.y + rect.h / 2);
+  ctx.restore();
+  void height;
+}
 export function drawStageBackground(
   ctx: CanvasRenderingContext2D,
   width: number,

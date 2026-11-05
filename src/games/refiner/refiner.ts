@@ -9,9 +9,11 @@
  * - Recipe picker: Refined Ferrite (Refining 1) and Galvanic Stock
  *   (Refining 5), gated by Refining level AND owned ore — a recipe
  *   you cannot afford or are not levelled for shows locked, with why.
- * - The input ore appears as a pile in a wheelbarrow/bin on the LEFT
- *   — up to 10 visible at a time, refilling from owned stock when one
- *   is taken; fewer than 10 owned shows exactly the owned count.
+ * - The input ore appears as a pile in a wheelbarrow/bin on the
+ *   LEFT-CENTRE — up to 10 visible at a time, refilling from owned
+ *   stock when one is taken; fewer than 10 owned shows exactly the
+ *   owned count. (v3.2: pulled in from the far left so the player
+ *   does not have to lean out of frame to reach it.)
  * - Grab: BOTH hands over the pile (held ~200 ms) -> one ore sticks
  *   to the hands. One ore at a time.
  * - Carry both hands to the hopper on the RIGHT -> the ore unsticks
@@ -51,7 +53,12 @@ import { inventory } from '../../core/inventory';
 import { toCanvas } from '../../render/stage';
 import type { NormalizedLandmark } from '../../tracking/poseTypes';
 import type { Game } from '../game';
-import { REFINING_RECIPES, recipeLockReason } from './recipes';
+import {
+  REFINING_RECIPES,
+  inputName,
+  recipeLockReason,
+  type RefiningRecipe,
+} from './recipes';
 import {
   RefinerMachine,
   type RefinerEvent,
@@ -67,22 +74,32 @@ export interface RefinerZone {
 }
 
 /**
- * Pile zone for a stage: LEFT side, waist height, where the hands
+ * Pile zone for a stage: LEFT-CENTRE, waist height, where the hands
  * rest when the arms hang (clasped hands read ~0.57 of stage height
- * in the mouse sim). The hopper mirrors it on the RIGHT.
+ * in the mouse sim). The hopper mirrors it on the RIGHT-CENTRE.
+ *
+ * v3.2 (Brandon's idea, Nov 4 playtest): the zones were far left
+ * (centre 0.16w) and far right (0.84w), so the player leaned and
+ * shifted side to side to reach them and their hips/knees slid out
+ * of frame — which tripped the gate mid-refine. Centres are now
+ * 0.30w / 0.70w: a ~0.20w reach from a centred stance, well inside
+ * the ~0.32w arm reach, while the pile's right edge (0.42w) still
+ * clears the torso's left edge (~0.44w) — any further inward and the
+ * bin would sit under the avatar. Height is unchanged (0.44h, waist
+ * height): the player must not have to bend forward to grab.
  */
 export function pileZoneForStage(
   width: number,
   height: number,
 ): RefinerZone {
-  return { x: width * 0.04, y: height * 0.44, w: width * 0.24, h: height * 0.3 };
+  return { x: width * 0.18, y: height * 0.44, w: width * 0.24, h: height * 0.3 };
 }
 
 export function hopperZoneForStage(
   width: number,
   height: number,
 ): RefinerZone {
-  return { x: width * 0.72, y: height * 0.44, w: width * 0.24, h: height * 0.3 };
+  return { x: width * 0.58, y: height * 0.44, w: width * 0.24, h: height * 0.3 };
 }
 
 /** True when canvas point (x, y) is inside zone. */
@@ -92,6 +109,67 @@ export function pointInZone(
   zone: RefinerZone,
 ): boolean {
   return x >= zone.x && x <= zone.x + zone.w && y >= zone.y && y <= zone.y + zone.h;
+}
+
+/**
+ * Recipe-picker card geometry (v3.2): one opaque card per recipe.
+ *
+ * Cards are 640 x 96 — big tap targets — stacked from y 140 with a
+ * 16 px gap, so two cards end at y 348: clear of the gate banner
+ * (bottom y 40, see `GATE_BANNER` in `render/renderer.ts`) and clear
+ * of the "Leave to town" chip (top y 488). The footer note sits
+ * below the cards. Pure, so tests can assert the zones never overlap
+ * without a canvas.
+ */
+export const PICKER_CARD = {
+  w: 640,
+  h: 96,
+  gap: 16,
+  top: 140,
+} as const;
+
+/** One picker card's canvas-space rect + recipe. */
+export interface PickerCardRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  recipeId: string;
+}
+
+/** Whole picker layout for a stage: cards, title lines, footer, leave. */
+export interface PickerLayout {
+  titleY: number;
+  subtitleY: number;
+  cards: PickerCardRect[];
+  /** First footer line (selection hint); a second line follows +28. */
+  footerY: number;
+  leave: { x: number; y: number; w: number; h: number };
+}
+
+export function pickerCardLayout(width: number, height: number): PickerLayout {
+  const x = Math.round(width / 2 - PICKER_CARD.w / 2);
+  return {
+    titleY: 60,
+    subtitleY: 100,
+    cards: REFINING_RECIPES.map((recipe, i) => ({
+      x,
+      y: PICKER_CARD.top + i * (PICKER_CARD.h + PICKER_CARD.gap),
+      w: PICKER_CARD.w,
+      h: PICKER_CARD.h,
+      recipeId: recipe.id,
+    })),
+    footerY:
+      PICKER_CARD.top +
+      REFINING_RECIPES.length * (PICKER_CARD.h + PICKER_CARD.gap) +
+      10,
+    leave: { x: 12, y: height - 52, w: 220, h: 40 },
+  };
+}
+
+/** Drawn colour of an input ore when its art has not loaded. */
+export function inputOreColor(recipe: RefiningRecipe): string {
+  return recipe.inputItemId === 'galvanite' ? '#d7dde6' : '#d97b3f';
 }
 
 interface LoadedImage {
@@ -145,16 +223,32 @@ export class RefinerGame implements Game {
   private lastWidth: number = STAGE.width;
   private lastHeight: number = STAGE.height;
   private lastShapeProgress = 0;
-  private lastEvent: RefinerEvent | null = null;
   private leaveRequested = false;
-  /** Recipe-picker chips + leave button, recomputed every render. */
-  private chipRects: {
+  /**
+   * Recipe-picker cards + leave chip, recomputed every render.
+   * `action` is `'leave'` or `'recipe:<id>'`.
+   */
+  private cardRects: {
     x: number;
     y: number;
     w: number;
     h: number;
     action: string;
   }[] = [];
+  /**
+   * Picker selection (v3.2): tap a card once to select it
+   * (highlighted), tap it again to start the batch. A tap never
+   * starts a batch by accident, and returning to the picker keeps
+   * the last recipe selected.
+   */
+  private selectedId: string | null = null;
+  /**
+   * Batch-complete announcement, drawn in the title banner zone
+   * until `announcementUntilMs` (v3.2): the canvas keeps only the
+   * phase banner — the instruction lives in the HUD.
+   */
+  private announcementText: string | null = null;
+  private announcementUntilMs = 0;
   private pointerListenerAttached = false;
   private lastCanvas: HTMLCanvasElement | null = null;
   private readonly outputImages = new Map<string, LoadedImage>();
@@ -177,18 +271,35 @@ export class RefinerGame implements Game {
   }
 
   /**
-   * Start a batch on a recipe (the picker calls this; the hub may
-   * deep-link it). Returns false when the recipe is locked — the
-   * picker shows the lock reason instead.
+   * Start a batch on a recipe (the picker calls this on the second
+   * tap on a selected card; the hub may deep-link it). Returns false
+   * when the recipe is locked — the picker shows the lock reason
+   * instead.
    */
   public selectRecipe(recipeId: string): boolean {
-    return this.machine.selectRecipe(recipeId);
+    const started = this.machine.selectRecipe(recipeId);
+    if (started) {
+      this.selectedId = null;
+      this.announcementText = null;
+      this.announcementUntilMs = 0;
+    }
+    return started;
+  }
+
+  /** The recipe the picker has selected (null = none). */
+  public get selectedRecipeId(): string | null {
+    return this.selectedId;
   }
 
   /** Back to the recipe picker (abandons the live batch). */
   public backToPicker(nowMs: number): void {
     void nowMs;
+    const prev = this.machine.currentRecipe?.id ?? null;
     this.machine.backToPicker();
+    // The last recipe stays selected, so one tap re-starts it.
+    this.selectedId = prev;
+    this.announcementText = null;
+    this.announcementUntilMs = 0;
   }
 
   /** True once the player has asked to leave (coordinator polls this). */
@@ -202,24 +313,34 @@ export class RefinerGame implements Game {
   }
 
   /**
-   * Canvas-space pointer tap. A tap on a recipe chip starts that
-   * batch (or shows the lock reason); a tap on "Leave to town"
-   * abandons the batch and fires `onLeaveToHub`.
+   * Canvas-space pointer tap. A tap on a recipe card selects it (or
+   * starts the batch on the second tap); a tap on a locked card does
+   * nothing — its lock reason is printed on the card itself. A tap on
+   * "Leave to town" abandons the batch and fires `onLeaveToHub`.
    */
   public pointerDownAt(x: number, y: number, _nowMs: number): boolean {
-    for (const chip of this.chipRects) {
-      if (x < chip.x || x > chip.x + chip.w || y < chip.y || y > chip.y + chip.h) {
+    for (const card of this.cardRects) {
+      if (x < card.x || x > card.x + card.w || y < card.y || y > card.y + card.h) {
         continue;
       }
-      if (chip.action === 'leave') {
+      if (card.action === 'leave') {
         this.requestLeave();
         return true;
       }
-      if (chip.action.startsWith('recipe:')) {
-        return this.machine.selectRecipe(chip.action.slice('recipe:'.length));
-      }
-      if (chip.action === 'picker') {
-        this.machine.backToPicker();
+      if (card.action.startsWith('recipe:')) {
+        const id = card.action.slice('recipe:'.length);
+        const recipe = REFINING_RECIPES.find((r) => r.id === id);
+        if (recipe === undefined) return false;
+        const lock = recipeLockReason(
+          recipe,
+          inventory.level('refining'),
+          inventory.count(recipe.inputItemId),
+        );
+        if (lock !== null) return true;
+        if (this.selectedId === id) {
+          return this.selectRecipe(id);
+        }
+        this.selectedId = id;
         return true;
       }
     }
@@ -232,7 +353,9 @@ export class RefinerGame implements Game {
     this.starJump.reset();
     this.paused = false;
     this.leaveRequested = false;
-    this.lastEvent = null;
+    this.selectedId = null;
+    this.announcementText = null;
+    this.announcementUntilMs = 0;
   }
 
   public stop(): void {
@@ -307,7 +430,7 @@ export class RefinerGame implements Game {
       hopper,
       nowMs,
     );
-    if (event !== null) this.applyEvent(event);
+    if (event !== null) this.applyEvent(event, nowMs);
   }
 
   public render(
@@ -325,9 +448,9 @@ export class RefinerGame implements Game {
     const pile = pileZoneForStage(width, height);
     const hopper = hopperZoneForStage(width, height);
 
-    // Fresh hit rects every frame: stale picker chips must never stay
+    // Fresh hit rects every frame: stale picker cards must never stay
     // tappable once a batch is running.
-    if (snap.phase !== 'pick') this.chipRects = [];
+    if (snap.phase !== 'pick') this.cardRects = [];
     if (snap.phase === 'pick') {
       this.drawPicker(ctx, width, height, nowMs);
       return;
@@ -335,12 +458,12 @@ export class RefinerGame implements Game {
     this.drawPile(ctx, pile, snap, nowMs);
     this.drawHopper(ctx, hopper, snap, nowMs);
     this.drawCarriedOre(ctx, body, width, height, snap);
-    this.drawProgress(ctx, snap, width, height);
-    this.drawHint(ctx, snap, width);
+    this.drawProgress(ctx, snap, width, height, nowMs);
     this.drawLeaveChip(ctx, width, height);
-    if (body === null || !body.present) {
-      this.drawNoBody(ctx, width, height);
-    }
+    // No "step into frame" text here: the gate owns that message (a
+    // small top banner while an activity screen is up — see
+    // `drawGateBanner`), and a mid-stage line would sit on top of the
+    // picker / pile / hopper.
   }
 
   public hudHtml(): string {
@@ -368,8 +491,7 @@ export class RefinerGame implements Game {
     };
   }
 
-  private applyEvent(event: RefinerEvent): void {
-    this.lastEvent = event;
+  private applyEvent(event: RefinerEvent, nowMs: number): void {
     if (event.kind === 'dropped') this.sfx.reload();
     if (event.kind === 'grabbed') this.sfx.shoot();
     if (event.kind === 'star-jump') this.sfx.feedback('good');
@@ -377,6 +499,13 @@ export class RefinerGame implements Game {
       const recipe = this.machine.currentRecipe;
       if (recipe !== null) {
         inventory.addXp('refining', recipe.xpPerBatch);
+        // The batch-complete line is an announcement, not an
+        // instruction: it replaces the title banner for a moment
+        // (top of the stage, clear of the head) and never also lands
+        // in the HUD hint — one surface per message.
+        this.announcementText =
+          `✨ ${recipe.name} made! +${recipe.xpPerBatch} Refining XP`;
+        this.announcementUntilMs = nowMs + 1600;
       }
       this.sfx.win();
     }
@@ -390,6 +519,16 @@ export class RefinerGame implements Game {
 
   // ------------------------------------------------------------- drawing ---
 
+  /**
+   * Recipe picker (v3.2): one opaque card per recipe — the v3.1 chips
+   * were translucent (`rgba(..., 0.72 / 0.45)`), so the avatar showed
+   * through them, and the gate overlay drew on top of them whenever
+   * the body was lost. A card carries the input ore image (left),
+   * the output image (right), the recipe name, `input → output`, XP
+   * per batch, the owned count, and — when locked — its reason. The
+   * selected card gets a thick gold border + a ✓ on its name. Cards
+   * are solid fills: nothing behind them ever shows through.
+   */
   private drawPicker(
     ctx: CanvasRenderingContext2D,
     width: number,
@@ -397,7 +536,8 @@ export class RefinerGame implements Game {
     _nowMs: number,
   ): void {
     const level = inventory.level('refining');
-    this.chipRects = [];
+    const layout = pickerCardLayout(width, height);
+    this.cardRects = [];
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -405,56 +545,109 @@ export class RefinerGame implements Game {
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.lineWidth = 6;
-    ctx.strokeText('🔥 Refiner — pick a recipe', width / 2, 60);
-    ctx.fillText('🔥 Refiner — pick a recipe', width / 2, 60);
+    ctx.strokeText('🔥 Refiner — pick a recipe', width / 2, layout.titleY);
+    ctx.fillText('🔥 Refiner — pick a recipe', width / 2, layout.titleY);
     ctx.font = `22px ${RENDER.gameFont}`;
     ctx.fillStyle = '#e8e8f0';
     ctx.fillText(
       `Refining Lv ${level} — ${inventory.xp('refining') % REFINER.xpPerLevel}/${REFINER.xpPerLevel} XP · 💰 ${inventory.credits} cr`,
       width / 2,
-      100,
+      layout.subtitleY,
     );
 
-    const chipW = 560;
-    const chipH = 64;
-    const gap = 16;
-    const x = width / 2 - chipW / 2;
-    REFINING_RECIPES.forEach((recipe, i) => {
-      const cy = 150 + i * (chipH + gap);
+    for (const card of layout.cards) {
+      const recipe = REFINING_RECIPES.find((r) => r.id === card.recipeId);
+      if (recipe === undefined) continue;
       const owned = inventory.count(recipe.inputItemId);
       const lock = recipeLockReason(recipe, level, owned);
-      this.chipRects.push({
-        x,
-        y: cy,
-        w: chipW,
-        h: chipH,
+      const selected = this.selectedId === recipe.id;
+      this.cardRects.push({
+        x: card.x,
+        y: card.y,
+        w: card.w,
+        h: card.h,
         action: `recipe:${recipe.id}`,
       });
+      // Solid fills only — a translucent card lets the avatar show
+      // through and kills readability (v3.1 bug).
       ctx.fillStyle =
-        lock === null ? 'rgba(11, 11, 18, 0.72)' : 'rgba(11, 11, 18, 0.45)';
-      ctx.fillRect(x, cy, chipW, chipH);
-      ctx.strokeStyle = lock === null ? '#ffd166' : 'rgba(232, 232, 240, 0.4)';
-      ctx.lineWidth = lock === null ? 3 : 2;
-      ctx.strokeRect(x, cy, chipW, chipH);
+        lock !== null ? '#1a1a2b' : selected ? '#2e2e4a' : '#232338';
+      ctx.fillRect(card.x, card.y, card.w, card.h);
+      ctx.strokeStyle =
+        lock !== null ? 'rgba(232, 232, 240, 0.4)' : '#ffd166';
+      ctx.lineWidth = selected ? 4 : lock !== null ? 2 : 3;
+      ctx.strokeRect(card.x, card.y, card.w, card.h);
+      // Input ore image (left) + output image (right), 56 px each;
+      // a drawn diamond in the item colour when the art has not
+      // loaded — never a hole, never a broken image.
+      this.drawCardIcon(ctx, card.x + 16, card.y + 20, 56, this.oreImages.get(recipe.inputItemId), inputOreColor(recipe));
+      this.drawCardIcon(ctx, card.x + card.w - 72, card.y + 20, 56, this.outputImages.get(recipe.id), recipe.fallbackColor);
+      // Line 1: name (✓ when selected) + XP per batch, right-aligned.
       ctx.textAlign = 'left';
       ctx.font = `700 24px ${RENDER.gameFont}`;
-      ctx.fillStyle = lock === null ? '#e8e8f0' : '#b9b9d6';
-      const label =
-        lock === null
-          ? `${recipe.name} — ${recipe.inputQuantity} ore → ${recipe.outputQuantity} · +${recipe.xpPerBatch} XP (own ${owned})`
-          : `🔒 ${recipe.name} — ${lock}`;
-      ctx.fillText(label, x + 14, cy + chipH / 2);
-    });
+      ctx.fillStyle = lock !== null ? '#b9b9d6' : '#ffffff';
+      const name =
+        lock !== null
+          ? `🔒 ${recipe.name}`
+          : selected
+            ? `✓ ${recipe.name}`
+            : recipe.name;
+      ctx.fillText(name, card.x + 88, card.y + 32);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText(`+${recipe.xpPerBatch} XP`, card.x + card.w - 88, card.y + 32);
+      // Line 2: input → output + owned, or the lock reason.
+      ctx.textAlign = 'left';
+      ctx.font = `20px ${RENDER.gameFont}`;
+      ctx.fillStyle = lock !== null ? '#b9b9d6' : '#e8e8f0';
+      const detail =
+        lock ??
+        `${recipe.inputQuantity} ${inputName(recipe)} → ${recipe.outputQuantity} ${recipe.name} · own ${owned}`;
+      ctx.fillText(detail, card.x + 88, card.y + 66);
+    }
+
     ctx.textAlign = 'center';
     ctx.font = `20px ${RENDER.gameFont}`;
     ctx.fillStyle = '#b9b9d6';
     ctx.fillText(
+      this.selectedId === null
+        ? 'Tap a recipe to select it — tap again to start.'
+        : '✓ Tap the highlighted recipe again to start.',
+      width / 2,
+      layout.footerY,
+    );
+    ctx.fillText(
       'Next recipe: Galvaferrite (Refining 8) — coming in a later slice.',
       width / 2,
-      150 + REFINING_RECIPES.length * (chipH + gap) + 10,
+      layout.footerY + 28,
     );
     this.drawLeaveChip(ctx, width, height);
     ctx.restore();
+  }
+
+  /** One 56 px item icon inside a picker card (image or fallback gem). */
+  private drawCardIcon(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    size: number,
+    image: LoadedImage | undefined,
+    fallbackColor: string,
+  ): void {
+    if (image !== undefined && image.loaded) {
+      ctx.drawImage(image.img, x, y, size, size);
+      return;
+    }
+    const cx = x + size / 2;
+    const cy = y + size / 2;
+    ctx.fillStyle = fallbackColor;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - size / 2);
+    ctx.lineTo(cx + size * 0.35, cy);
+    ctx.lineTo(cx, cy + size / 2);
+    ctx.lineTo(cx - size * 0.35, cy);
+    ctx.closePath();
+    ctx.fill();
   }
 
   private drawPile(
@@ -605,11 +798,20 @@ export class RefinerGame implements Game {
     ctx.restore();
   }
 
+  /**
+   * Title / phase banner ONLY (v3.2). The star progress lives in the
+   * HUD (⭐ n/3) — the canvas stars sat on the avatar's hat (t70) —
+   * and the star-jump instruction + last-event line duplicated the
+   * HUD hint (t48: the same instruction three times). The one
+   * exception is a batch-complete announcement, which replaces the
+   * title in the same banner zone for a moment.
+   */
   private drawProgress(
     ctx: CanvasRenderingContext2D,
     snap: RefinerSnapshot,
     width: number,
     height: number,
+    nowMs: number,
   ): void {
     ctx.save();
     ctx.textAlign = 'center';
@@ -618,42 +820,13 @@ export class RefinerGame implements Game {
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.lineWidth = 6;
-    const title = snap.recipeName ?? 'Refiner';
-    ctx.strokeText(`🔥 ${title}`, width / 2, 58);
-    ctx.fillText(`🔥 ${title}`, width / 2, 58);
-    if (snap.phase === 'jumping' || snap.jumpsDone > 0) {
-      const stars = '⭐'.repeat(snap.jumpsDone) + '☆'.repeat(REFINER.starJumpsPerBatch - snap.jumpsDone);
-      ctx.font = `40px ${RENDER.gameFont}`;
-      ctx.strokeText(stars, width / 2, 104);
-      ctx.fillStyle = '#ffd166';
-      ctx.fillText(stars, width / 2, 104);
-      ctx.font = `22px ${RENDER.gameFont}`;
-      ctx.fillStyle = '#e8e8f0';
-      ctx.fillText(
-        `Star jumps: ${snap.jumpsDone}/${REFINER.starJumpsPerBatch} — jump with arms and legs wide!`,
-        width / 2,
-        140,
-      );
-    } else if (this.lastEvent !== null) {
-      ctx.font = `24px ${RENDER.gameFont}`;
-      ctx.fillStyle = '#e8e8f0';
-      ctx.fillText(this.lastEvent.message, width / 2, 104);
-    }
+    const text =
+      this.announcementText !== null && nowMs < this.announcementUntilMs
+        ? this.announcementText
+        : `🔥 ${snap.recipeName ?? 'Refiner'}`;
+    ctx.strokeText(text, width / 2, 58);
+    ctx.fillText(text, width / 2, 58);
     void height;
-    ctx.restore();
-  }
-
-  private drawHint(
-    ctx: CanvasRenderingContext2D,
-    snap: RefinerSnapshot,
-    width: number,
-  ): void {
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `22px ${RENDER.gameFont}`;
-    ctx.fillStyle = '#e8e8f0';
-    ctx.fillText(snap.hint, width / 2, 178);
     ctx.restore();
   }
 
@@ -662,16 +835,15 @@ export class RefinerGame implements Game {
     width: number,
     height: number,
   ): void {
-    const w = 220;
-    const h = 40;
-    const x = 12;
-    const y = height - h - 12;
-    // Picker render resets chipRects; the game render appends to it —
+    const { x, y, w, h } = pickerCardLayout(width, height).leave;
+    // Picker render resets cardRects; the game render appends to it —
     // keep exactly one leave chip by replacing any previous one.
-    this.chipRects = this.chipRects.filter((c) => c.action !== 'leave');
-    this.chipRects.push({ x, y, w, h, action: 'leave' });
+    this.cardRects = this.cardRects.filter((c) => c.action !== 'leave');
+    this.cardRects.push({ x, y, w, h, action: 'leave' });
     ctx.save();
-    ctx.fillStyle = 'rgba(11, 11, 18, 0.72)';
+    // Solid fill, like the picker cards: a translucent control over
+    // the avatar is the same readability bug as a translucent chip.
+    ctx.fillStyle = '#232338';
     ctx.fillRect(x, y, w, h);
     ctx.strokeStyle = 'rgba(232, 232, 240, 0.5)';
     ctx.lineWidth = 2;
@@ -683,23 +855,6 @@ export class RefinerGame implements Game {
     ctx.fillText('⬅ Leave to town', x + w / 2, y + h / 2);
     ctx.restore();
     void width;
-  }
-
-  private drawNoBody(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-  ): void {
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `700 28px ${RENDER.gameFont}`;
-    ctx.fillStyle = '#ffd166';
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
-    ctx.lineWidth = 6;
-    ctx.strokeText('Step into frame to refine!', width / 2, height / 2);
-    ctx.fillText('Step into frame to refine!', width / 2, height / 2);
-    ctx.restore();
   }
 
   private attachPointerListener(canvas: HTMLCanvasElement): void {

@@ -13,9 +13,9 @@
  * cannot affect them.
  *
  * Transition table under test (see `PauseController` for the full
- * table): manual stays paused when the body returns; auto resumes
- * when the body returns; Spacebar / Pause button toggle manual; auto
- * never opens the hub; manual survives a gate cycle.
+ * table): town stays open when the body returns; auto resumes when
+ * the body returns; Spacebar / Town button toggle town; auto never
+ * opens town; town survives a gate cycle.
  */
 
 import { describe, expect, it } from 'vitest';

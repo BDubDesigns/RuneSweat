@@ -21,6 +21,11 @@ body {
   color: var(--ink);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   min-height: 100dvh;
+  /* Safety net, not the fix: nothing on the page may be wider than
+     the viewport, so a stray wide element can never add a horizontal
+     scrollbar (the Nov 4 frames show the HUD clipped at the left
+     edge). The fit itself comes from the stage formula below. */
+  overflow-x: hidden;
 }
 
 #app {
@@ -142,7 +147,9 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 20px;
-  font-size: 1.25rem;
+  /* 1.15rem (was 1.25rem): the stats + instruction spans wrap to
+     2-3 lines; smaller text keeps the wrap short so the page fits. */
+  font-size: 1.15rem;
   font-weight: 700;
   min-height: 1.6em;
 }
@@ -154,8 +161,12 @@ body {
 }
 
 .btn {
-  font-size: 1.05rem;
-  padding: 10px 16px;
+  /* 1rem / 10px 14px (was 1.05rem / 10px 16px): the 8-button row is
+     ~1100 px at the old size and only just fit the 1248 px content
+     width — at a narrower window it wrapped mid-row and pushed the
+     page taller. Smaller buttons keep one row at desktop widths. */
+  font-size: 1rem;
+  padding: 10px 14px;
   border-radius: 12px;
   border: none;
   background: var(--card);
@@ -193,12 +204,24 @@ body {
    never stretched: it grows to the available window (width and viewport
    height both cap it), and in fullscreen the whole stage section fills
    the screen the same way. The portrait-phone letterboxing is untouched
-   — the canvas backing store is still fixed landscape. */
+   — the canvas backing store is still fixed landscape.
+ *
+ * v3.2 — the page must fit the viewport (Nov 4 playtest: the page
+ * scrolled, the green body-status line sat below the fold, the HUD
+ * clipped at the left edge). The old reserve (300 px / 240 px
+ * fullscreen) was short of the real chrome: header ~75 + #app gaps
+ * 24 + HUD 2-3 lines ~66 + controls ~44 + body-status line ~24 +
+ * legend ~40 + #app padding 32 = ~305 px, and the window is shorter
+ * than the screen once the browser chrome takes its ~100 px. The
+ * reserve is now 440 px (380 fullscreen): stage height = viewport
+ * height - reserve, so stage + chrome always fits — at 1080 the
+ * stage is 640 tall and the page totals ~945; at 980 (browser
+ * chrome) the stage is 540 tall and the page totals ~800. */
 main#app {
   max-width: min(1280px, 100%);
 }
 #stage-section .stage-wrap {
-  width: min(100%, calc((100dvh - 300px) * 16 / 9));
+  width: min(100%, calc((100dvh - 440px) * 16 / 9));
   margin-inline: auto;
 }
 #stage-section:fullscreen:not([hidden]) {
@@ -210,5 +233,19 @@ main#app {
   overflow: auto;
 }
 #stage-section:fullscreen .stage-wrap {
-  width: min(100%, calc((100dvh - 240px) * 16 / 9));
+  width: min(100%, calc((100dvh - 380px) * 16 / 9));
+}
+
+/* Short windows: the tagline is the cheapest chrome to drop (~25 px),
+   and the legend shrinks — the stage is what the player is here for. */
+@media (max-height: 1000px) {
+  .tagline {
+    display: none;
+  }
+  #hub-header h1 {
+    font-size: 1.8rem;
+  }
+  #legend {
+    font-size: 0.85rem;
+  }
 }

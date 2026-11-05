@@ -16,6 +16,8 @@ import { makePose } from '../core/poseFixture';
 import {
   AvatarRenderer,
   avatarJoints,
+  faceGeometry,
+  hardHatGeometry,
   headGeometry,
   headRadiusPx,
   limbWidthPx,
@@ -37,6 +39,42 @@ function stubContext(): CanvasRenderingContext2D {
       return true;
     },
   }) as unknown as CanvasRenderingContext2D;
+}
+
+/**
+ * A recording stand-in: like `stubContext`, but every method call is
+ * logged (method name + args) so tests can prove DRAW ORDER — e.g.
+ * that the hat dome is painted before the eyes. Property sets are
+ * also recorded for `fillStyle` (the background-fill assertions).
+ */
+interface RecordedCall {
+  method: string;
+  args: unknown[];
+}
+function recordingContext(): {
+  ctx: CanvasRenderingContext2D;
+  calls: RecordedCall[];
+  fillStyles: string[];
+} {
+  const calls: RecordedCall[] = [];
+  const fillStyles: string[] = [];
+  const target: Record<string, unknown> = {};
+  const ctx = new Proxy(target, {
+    get: (_t, prop) => {
+      if (prop === 'canvas') return { width: 960, height: 540 };
+      return (...args: unknown[]) => {
+        calls.push({ method: String(prop), args });
+      };
+    },
+    set: (t, prop, value) => {
+      if (prop === 'fillStyle' && typeof value === 'string') {
+        fillStyles.push(value);
+      }
+      t[prop as string] = value;
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+  return { ctx, calls, fillStyles };
 }
 
 describe('avatarJoints', () => {
@@ -134,6 +172,70 @@ describe('headGeometry (v3.1: bigger head, sitting on the neck)', () => {
   });
 });
 
+describe('hardHatGeometry + faceGeometry (v3.2: eyes under the hat)', () => {
+  function head(): {
+    cx: number;
+    cy: number;
+    r: number;
+    noseX: number;
+  } {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    if (joints === null) throw new Error('fixture pose incomplete');
+    const headR = headRadiusPx(joints.torsoLengthPx);
+    const h = headGeometry(joints, headR);
+    return { ...h, noseX: joints.nose.x };
+  }
+
+  it('the v3.1 eye position was inside the dome — the bug, pinned', () => {
+    const h = head();
+    const hat = hardHatGeometry(h);
+    // v3.1 eyes: (nose.x ± 0.38r, cy - 0.3r). Distance from the dome
+    // centre (cx, topY): sqrt(0.38² + 0.18²)r ≈ 0.42r, well inside
+    // the 1.02r dome — and the dome was painted AFTER the eyes.
+    const eyeY = h.cy - h.r * 0.3;
+    const dx = h.r * 0.38;
+    const dist = Math.hypot(dx, eyeY - hat.topY);
+    expect(dist).toBeLessThan(hat.domeRadius);
+    expect(eyeY).toBeLessThan(hat.brimBottomY);
+  });
+
+  it('the brim bottom sits at cy + 0.04r', () => {
+    const h = head();
+    const hat = hardHatGeometry(h);
+    expect(hat.brimBottomY).toBeCloseTo(h.cy + h.r * 0.04, 6);
+    expect(hat.domeRadius).toBeCloseTo(h.r * 1.02, 6);
+  });
+
+  it('the eyes sit below the brim bottom, inside the head circle', () => {
+    const h = head();
+    const hat = hardHatGeometry(h);
+    const face = faceGeometry(h);
+    expect(face.eyeY).toBeGreaterThan(hat.brimBottomY);
+    // Both eyes fully inside the head circle.
+    for (const ex of [h.noseX - face.eyeDX, h.noseX + face.eyeDX]) {
+      const dist = Math.hypot(ex - h.cx, face.eyeY - h.cy);
+      expect(dist + face.eyeRadius).toBeLessThan(h.r);
+    }
+  });
+
+  it('the eyes are bigger than v3.1 (0.09r -> 0.15r)', () => {
+    const h = head();
+    const face = faceGeometry(h);
+    expect(face.eyeRadius).toBeCloseTo(h.r * 0.15, 6);
+    expect(face.eyeRadius).toBeGreaterThan(h.r * 0.09);
+    // ~12 px across on the sim body (r ≈ 39 px) — readable at phone size.
+    expect(face.eyeRadius * 2).toBeGreaterThan(10);
+  });
+
+  it('the smile sits below the eyes and inside the head', () => {
+    const h = head();
+    const face = faceGeometry(h);
+    expect(face.smileY).toBeGreaterThan(face.eyeY + face.eyeRadius);
+    expect(face.smileY + face.smileRadius).toBeLessThan(h.cy + h.r);
+  });
+});
+
 describe('resolveOutfit', () => {
   it('defaults to the mining outfit (white tank, heart boxers, hard hat)', () => {
     const outfit = resolveOutfit();
@@ -179,5 +281,47 @@ describe('AvatarRenderer.draw', () => {
     expect(() =>
       renderer.draw(ctx, moved, 960, 540, OUTFIT, 1016),
     ).not.toThrow();
+  });
+
+  it('draws the hat dome BEFORE the eyes, and the eyes below the brim (v3.2)', () => {
+    const renderer = new AvatarRenderer();
+    const { ctx, calls } = recordingContext();
+    const pose = makePose({ leftArmDeg: 10, rightArmDeg: -10 });
+    renderer.draw(ctx, pose, 960, 540, OUTFIT, 1000);
+
+    const joints = avatarJoints(pose, 960, 540);
+    if (joints === null) throw new Error('fixture pose incomplete');
+    const headR = headRadiusPx(joints.torsoLengthPx);
+    const h = headGeometry(joints, headR);
+    const hat = hardHatGeometry(h);
+    const face = faceGeometry(h);
+
+    // All arc() calls, in draw order, with their (x, y, radius).
+    const arcs = calls
+      .filter((c) => c.method === 'arc')
+      .map((c) => ({
+        x: c.args[0] as number,
+        y: c.args[1] as number,
+        r: c.args[2] as number,
+      }));
+    const close = (a: number, b: number): boolean => Math.abs(a - b) < 1;
+    // The dome: radius 1.02r, centred at (cx, topY).
+    const domeIdx = arcs.findIndex(
+      (a) => close(a.r, hat.domeRadius) && close(a.y, hat.topY),
+    );
+    expect(domeIdx).toBeGreaterThanOrEqual(0);
+    // The eyes: radius 0.15r, at eyeY. (The head circle is r, the
+    // smile is 0.30r — neither matches 0.15r.)
+    const eyeIdxs = arcs
+      .map((a, i) => ({ a, i }))
+      .filter(({ a }) => close(a.r, face.eyeRadius) && close(a.y, face.eyeY))
+      .map(({ i }) => i);
+    expect(eyeIdxs).toHaveLength(2);
+    for (const i of eyeIdxs) {
+      // Hat first, eyes after — the dome can no longer paint over them.
+      expect(i).toBeGreaterThan(domeIdx);
+      // And the eyes sit below the brim bottom in the visible band.
+      expect(arcs[i]?.y ?? 0).toBeGreaterThan(hat.brimBottomY);
+    }
   });
 });

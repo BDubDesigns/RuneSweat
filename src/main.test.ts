@@ -19,6 +19,14 @@ class StubElement {
   public classList = { add: () => {}, remove: () => {} };
   private readonly handlers = new Map<string, ((event: never) => void)[]>();
   public requestFullscreenCalls = 0;
+  /**
+   * Canvas calls recorded by the stub 2D context (v3.2): method name
+   * + args, in order, plus every `fillStyle` set. Tests use these to
+   * prove what a frame actually drew — e.g. that town paints its
+   * opaque background first and the game draws nothing behind it.
+   */
+  public drawCalls: { method: string; args: unknown[] }[] = [];
+  public fillStyles: string[] = [];
 
   public addEventListener(type: string, fn: (event: never) => void): void {
     const list = this.handlers.get(type) ?? [];
@@ -49,13 +57,24 @@ class StubElement {
     // hand back undefined for both and throw. The proxy's target IS
     // this element, so `canvas` comes back as the element itself
     // (with a working addEventListener for the games' tap listeners).
-    // Everything else is a no-op: drawing is unobservable in node,
-    // only the wiring is.
+    // Everything else is a no-op that records the call: drawing is
+    // unobservable in node, only the wiring is — but WHICH calls a
+    // frame made is observable, and the town tests rely on it.
     return new Proxy(this, {
       get: (target, prop) => {
         if (prop === 'canvas') return target;
         if (prop === 'measureText') return () => ({ width: 0 });
-        return () => undefined;
+        return (...args: unknown[]) => {
+          target.drawCalls.push({ method: String(prop), args });
+        };
+      },
+      set: (target, prop, value) => {
+        if (prop === 'fillStyle' && typeof value === 'string') {
+          target.fillStyles.push(value);
+        }
+        (target as unknown as Record<string | symbol, unknown>)[prop] =
+          value;
+        return true;
       },
     });
   }
@@ -151,6 +170,12 @@ describe('fullscreen toggle wiring', () => {
     const btn = elements.get('btn-fullscreen');
     expect(btn).toBeDefined();
     expect(btn?.textContent).toBe('⛶ Fullscreen');
+  });
+
+  it('the Town button says Town, not Pause (v3.2)', () => {
+    const btn = elements.get('btn-pause');
+    expect(btn).toBeDefined();
+    expect(btn?.textContent).toBe('🏠 Town');
   });
 
   it('clicking requests fullscreen on the stage section', async () => {
@@ -249,30 +274,85 @@ describe('fullscreen toggle wiring', () => {
     driveFrames(90);
     expect(hudText()).toContain('Mining Lv');
 
-    // Space: manual pause, hub opens.
+    // Space: go to town. The Town button now names the way back.
     dispatchDocumentEvent('keydown', {
       key: ' ',
       repeat: false,
       preventDefault: () => {},
     });
-    expect(pauseLabel()).toBe('▶ Play');
-    // A frame renders the hub, computing its button rects. The
-    // Refiner button is right-column, first activity: x 492..936,
-    // y 156..208.
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    // A frame renders town, computing its button rects. Mine is the
+    // first activity button now, Refiner the second: right column,
+    // x 492..936, y 218..270.
     driveFrames(2);
-    dispatchCanvasPointerDown(714, 182);
+    dispatchCanvasPointerDown(714, 244);
 
     // The refiner starts on the next update; the HUD shows it.
     driveFrames(3);
     expect(hudText()).toContain('Refining Lv');
-    expect(pauseLabel()).toBe('⏸ Pause');
+    expect(pauseLabel()).toBe('🏠 Town');
 
     // "Leave to town" chip: bottom-left, x 12..232, y 488..528.
     dispatchCanvasPointerDown(122, 508);
     driveFrames(2);
-    // Swing Lab is restored and the hub is open again (manual pause).
+    // Swing Lab is restored and town is open again.
     expect(hudText()).toContain('Mining Lv');
-    expect(pauseLabel()).toBe('▶ Play');
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+  });
+
+  it('town is a place: while it is open the game is not drawn behind it (v3.2)', () => {
+    // State carried from the previous test: Swing Lab active, town
+    // open (manual pause), Town button says '⛏ Back to the mine'.
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    stage.drawCalls.length = 0;
+    stage.fillStyles.length = 0;
+
+    driveFrames(2);
+    const methods = stage.drawCalls.map((c) => c.method);
+    // No avatar (feet are ellipses) and no node (also ellipses):
+    // the game draws nothing while town is open.
+    expect(methods).not.toContain('ellipse');
+    // No stage background either (RENDER.stageColor '#14141f').
+    expect(stage.fillStyles).not.toContain('#14141f');
+    // The first thing each frame paints is the town screen: a
+    // full-canvas fill in the solid, opaque town background.
+    const fillRects = stage.drawCalls.filter((c) => c.method === 'fillRect');
+    expect(fillRects[0]?.args).toEqual([0, 0, 960, 540]);
+    expect(stage.fillStyles[0]).toBe('#0d0d18');
+
+    // Space leaves town and returns to the mine.
+    dispatchDocumentEvent('keydown', {
+      key: ' ',
+      repeat: false,
+      preventDefault: () => {},
+    });
+    expect(pauseLabel()).toBe('🏠 Town');
+    // The game draws again once back in the mine.
+    stage.drawCalls.length = 0;
+    driveFrames(2);
+    expect(stage.drawCalls.map((c) => c.method)).toContain('ellipse');
+    // And Space goes to town again.
+    dispatchDocumentEvent('keydown', {
+      key: ' ',
+      repeat: false,
+      preventDefault: () => {},
+    });
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+  });
+
+  it('the Mine spot in town returns to the mine (v3.2)', () => {
+    // State carried from the previous test: town open from mining.
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    driveFrames(2);
+    // Mine is the first activity button: x 492..936, y 156..208.
+    dispatchCanvasPointerDown(714, 182);
+    expect(pauseLabel()).toBe('🏠 Town');
+    driveFrames(2);
+    expect(hudText()).toContain('Mining Lv');
   });
 });
 });

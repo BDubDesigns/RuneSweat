@@ -679,10 +679,11 @@ function main(): void {
   }
 
   /**
-   * Which activity the gate should judge (v3.2): the refiner's picker
-   * has no gate, carry/drop and the pedestal press use the refiner rule
-   * (shoulders + hips, 1500 ms grace, knees not required), everything
-   * else is the swing rule (knees required, 500 ms grace).
+   * Which activity the gate should judge (v3.2; knees dropped v3.7):
+   * the refiner's picker has no gate, carry/drop and the pedestal
+   * press use the refiner rule (shoulders + hips, 1500 ms grace),
+   * everything else is the swing rule (shoulders + hips, 500 ms
+   * grace). Knees are not a gate input anywhere since v3.7.
    */
   function gateActivity(): GateActivity {
     if (activeGame instanceof RefinerGame) {
@@ -1166,10 +1167,10 @@ function main(): void {
       // and the model state. While gated the simulation never advances.
       // frameAgeMs is the age of the last DISTINCT frame received, so a
       // frozen feed closes the gate even when the last frame looked fine.
-      // Per-activity gate (v3.2): the active activity's requirements
-      // (knees + grace) travel with the evaluation. The picker passes
-      // null requirements, so evaluateGate returns open and the gate
-      // never pauses or draws over the chips.
+      // Per-activity gate (v3.2; knees dropped v3.7): the active
+      // activity's requirements (grace) travel with the evaluation.
+      // The picker passes null requirements, so evaluateGate returns
+      // open and the gate never pauses or draws over the chips.
       const gateOptions: GateOptions = {
         requirements: gateRequirementsFor(gateActivity()),
       };
@@ -1285,7 +1286,7 @@ function main(): void {
       // full dim + ghost — the overlay used to cover the recipe
       // picker, the tier chips and "Leave to town" (t4). The banner
       // shows the gate's message, which now names the missing
-      // landmarks ("I can't see your knees — step back").
+      // landmarks ("I can't see your shoulders — step back").
       if (activeGame !== null && currentGate.gated && pause.kind !== 'manual') {
         const isModel = currentGate.reason !== 'no-body';
         if (

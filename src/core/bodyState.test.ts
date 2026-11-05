@@ -193,7 +193,7 @@ describe('BodyStateTracker bodyUsable', () => {
     expect(state.bodyUsable).toBe(false);
   });
 
-  it('is not usable when knees are hidden (requireKnees is true)', () => {
+  it('is usable when knees are hidden (v3.7: knees are not a gate input)', () => {
     const tracker = new BodyStateTracker();
     const pose = makePose({
       visibilityOverrides: {
@@ -203,19 +203,20 @@ describe('BodyStateTracker bodyUsable', () => {
     });
     const state = tracker.update(makeFrame(pose, 1000));
     expect(state.kneesVisible).toBe(false);
-    // Nov 4, 2026 playtest: the gate said "Body found" with knees hidden.
-    // A full-body swing game cannot trust a body whose knees it can't see.
-    expect(state.bodyUsable).toBe(false);
+    // v3.7 supersedes the v3.2 rule: reaching up takes the knees out
+    // of frame, and the swing only needs arms + head + chest — so a
+    // knees-hidden body is still usable. `kneesVisible` stays as data.
+    expect(state.bodyUsable).toBe(true);
   });
 
-  it('is not usable when one knee is hidden', () => {
+  it('kneesVisible is false when one knee is hidden, but the body stays usable (v3.7)', () => {
     const tracker = new BodyStateTracker();
     const pose = makePose({
       visibilityOverrides: { [PoseLandmark.RIGHT_KNEE]: 0.2 },
     });
     const state = tracker.update(makeFrame(pose, 1000));
     expect(state.kneesVisible).toBe(false);
-    expect(state.bodyUsable).toBe(false);
+    expect(state.bodyUsable).toBe(true);
   });
 
   it('is not usable when every torso landmark is low-visibility', () => {

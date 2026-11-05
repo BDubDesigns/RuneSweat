@@ -37,25 +37,30 @@ export const STAGE = {
 } as const;
 
 /**
- * Body-visible gate. A game must not run while no usable full-body pose
- * is present — otherwise the player can lose (as in the Nov 4 playtest:
+ * Body-visible gate. A game must not run while no usable pose is
+ * present — otherwise the player can lose (as in the Nov 4 playtest:
  * Game Over, score 0) without ever having been seen.
+ *
+ * v3.7 (Nov 5, 2026): shoulders + hips ONLY — knees are no longer a
+ * gate input anywhere. The v3.6 playtest showed why: Brandon reached
+ * up to the top-right action circle, his knees left the frame, the
+ * gate tripped ("can't see my knees"), and the hover/dwell did
+ * nothing. The swing only needs arms + head + chest, so knees were
+ * never load-bearing for the game — they were a framing proxy, and a
+ * bad one at the top of a reach. This supersedes the v3.2 rule that
+ * swings keep knees (and the Nov 4 "Body found with knees hidden"
+ * finding that motivated it: the stale-frame rule, not knees, is
+ * what stops a frozen feed from counting as a body). Knee
+ * visibility is still tracked in `BodyState` (data for the HUD and
+ * duck detection) — it just stops being a gate input.
  */
 export const GATE = {
   /**
-   * Minimum per-landmark visibility for shoulders + hips + knees. Reuses
+   * Minimum per-landmark visibility for shoulders + hips. Reuses
    * `POSE.minVisibility`; the gate checks each landmark individually —
    * the mean `visibilityScore` can hide one bad landmark.
    */
   minVisibility: 0.5,
-  /**
-   * Knees are required for full-body swing games: a body counts as usable
-   * only when shoulders + hips + knees are EACH at or above
-   * `minVisibility`. The Nov 4, 2026 Swing Lab playtest showed "Body
-   * found" while the knees were hidden, so the gate was trusting a
-   * partial body. The grace period still covers mid-game knee flicker.
-   */
-  requireKnees: true,
   /**
    * A pose frame older than this (ms) counts as a frozen feed and closes
    * the gate, even inside the grace period. The Nov 4 playtest ran for
@@ -79,24 +84,29 @@ export const GATE = {
 } as const;
 
 /**
- * Per-activity gate requirements (v3.2, Nov 4 playtest): the gate takes
- * what the activity actually needs, not one global rule.
+ * Per-activity gate requirements (v3.2, Nov 4 playtest; knees dropped
+ * in v3.7, Nov 5): the gate takes what the activity actually needs,
+ * not one global rule — and since v3.7 every activity needs the same
+ * thing, shoulders + hips, differing only in grace.
  *
  * The Nov 4 refining playtest kept tripping the gate while Brandon was
  * standing right there: the global rule required knees, and reaching
  * side to side (pile far left, hopper far right) + leaning toward the
- * laptop dipped the far knee below visibility or out of frame.
+ * laptop dipped the far knee below visibility or out of frame. The
+ * refiner dropped knees first (v3.2); the v3.6 playtest showed the
+ * swing had the same failure at the top of a reach — reaching for
+ * the action circle took his knees out of frame and killed the
+ * hover/dwell — so v3.7 drops knees for the swing too. The swing
+ * only needs arms + head + chest; knees were never load-bearing.
  *
- * - `swing`: the full-body game. Knees are a real reference — the Nov
- *   4 playtest showed "Body found" with the knees hidden, which is
- *   why `requireKnees` exists — so they stay required, and the grace
- *   stays short (500 ms): a swing with a lost body must stop fast.
- * - `refiner-carry` (pick-up / carry / drop): the hands are the point
- *   — the grab logic itself needs both wrists together over the pile,
- *   so the gate does not also need to see the wrists (BodyState does
- *   not carry wrist visibility). What the gate checks is shoulders +
- *   hips; knees are NOT required. Grace 1500 ms: a brief dip while
- *   reaching or leaning must not trip it.
+ * - `swing`: shoulders + hips, grace 500 ms: a swing with a lost body
+ *   must stop fast.
+ * - `refiner-carry` (pick-up / carry / drop): shoulders + hips.
+ *   The hands are the point — the grab logic itself needs both
+ *   wrists together over the pile, so the gate does not also need
+ *   to see the wrists (BodyState does not carry wrist visibility).
+ *   Grace 1500 ms: a brief dip while reaching or leaning must not
+ *   trip it.
  * - `refiner-press` (pedestal presses): same body rule as carry
  *   (shoulders + hips, 1500 ms grace). The buttons are the press
  *   detector's job — the gate cannot see wrist visibility
@@ -109,9 +119,9 @@ export const GATE = {
  *   requirements and `evaluateGate` returns open.
  */
 export const GATE_ACTIVITIES = {
-  swing: { requireKnees: true, gracePeriodMs: 500 },
-  'refiner-carry': { requireKnees: false, gracePeriodMs: 1500 },
-  'refiner-press': { requireKnees: false, gracePeriodMs: 1500 },
+  swing: { gracePeriodMs: 500 },
+  'refiner-carry': { gracePeriodMs: 1500 },
+  'refiner-press': { gracePeriodMs: 1500 },
   picker: null,
 } as const;
 

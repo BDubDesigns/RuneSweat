@@ -59,15 +59,17 @@ export interface GateOptions {
   gracePeriodMs?: number;
   /**
    * What the active activity needs from the body (v3.2, Nov 4
-   * playtest). When provided, the gate judges usability from the
-   * activity's requirements instead of the global `bodyUsable`
-   * (which always requires knees, the swing rule) — so the refiner
-   * stays open while a knee dips during a reach, and the swing
-   * keeps its strict rule. `null` means the gate does not apply at
-   * all (the recipe picker: a mouse click needs no body) and
-   * `evaluateGate` returns open. Undefined keeps the old behaviour
-   * (global `bodyUsable`, swing grace) for callers that do not pass
-   * requirements yet.
+   * playtest; knees dropped v3.7, Nov 5). When provided, the gate
+   * judges usability from the activity's requirements instead of
+   * the global `bodyUsable` — so the refiner stays open while a
+   * shoulder/hip dips during a reach, on its longer grace. `null`
+   * means the gate does not apply at all (the recipe picker: a
+   * mouse click needs no body) and `evaluateGate` returns open.
+   * Undefined keeps the old behaviour (global `bodyUsable`,
+   * swing grace) for callers that do not pass requirements yet.
+   * Since v3.7 every activity needs shoulders + hips only, so the
+   * requirements differ by grace alone — knees are not a gate
+   * input anywhere (see `GATE` in `config.ts`).
    */
   requirements?: GateRequirements | null;
   /**
@@ -90,17 +92,17 @@ export interface GateOptions {
 /**
  * What one activity needs from the body, from `GATE_ACTIVITIES` in
  * `config.ts`. Shoulders + hips are required by every activity (the
- * frame anchor); `requireKnees` is the per-activity switch — the
- * swing needs the knees as a reference, the refiner does not. The
- * wrists (refiner carry) and buttons (pedestal presses) are the
- * games' own inputs — the grab logic needs both wrists together, the
- * press detector needs the wrists in the button zones — so the gate
- * does not also check them: `BodyState` does not carry wrist
- * visibility, and a gate that pretended to check them would be lying.
+ * frame anchor); the only per-activity difference is the grace
+ * period. Knees are NOT a gate input (v3.7): the v3.6 playtest
+ * showed reaching for the top-right action circle taking the knees
+ * out of frame and killing the hover/dwell. The wrists (refiner
+ * carry) and buttons (pedestal presses) are the games' own inputs —
+ * the grab logic needs both wrists together, the press detector
+ * needs the wrists in the button zones — so the gate does not also
+ * check them: `BodyState` does not carry wrist visibility, and a
+ * gate that pretended to check them would be lying.
  */
 export interface GateRequirements {
-  /** Knees must each be at or above `GATE.minVisibility`. */
-  requireKnees: boolean;
   /** Grace period in ms before a lost body closes the gate. */
   gracePeriodMs: number;
 }
@@ -121,16 +123,13 @@ export function gateRequirementsFor(
 
 /**
  * Usable for one activity: present, in frame, shoulders + hips each
- * at or above `GATE.minVisibility`, and knees too when the activity
- * requires them. This is the per-activity version of
- * `BodyState.bodyUsable` (which always requires knees, the swing
- * rule) — the refiner calls it with `requireKnees: false`, so a knee
- * dipping during a side reach does not close the gate.
+ * at or above `GATE.minVisibility`. Knees are never checked (v3.7):
+ * a body whose knees leave the frame mid-reach is still a usable
+ * upper body, and the swing only needs arms + head + chest. This is
+ * the per-activity version of `BodyState.bodyUsable`, which since
+ * v3.7 is the same shoulders + hips rule.
  */
-export function bodyUsableForActivity(
-  body: BodyState | null,
-  requirements: GateRequirements,
-): boolean {
+export function bodyUsableForActivity(body: BodyState | null): boolean {
   if (body === null || !body.present || !body.inFrame) return false;
   const v = body.landmarkVisibility;
   const min = GATE.minVisibility;
@@ -142,33 +141,17 @@ export function bodyUsableForActivity(
   ) {
     return false;
   }
-  if (
-    requirements.requireKnees &&
-    (v.leftKnee < min || v.rightKnee < min)
-  ) {
-    return false;
-  }
   return true;
 }
 
 /** Body parts the gate cannot see, for the missing-landmark message. */
-export function missingBodyParts(
-  body: BodyState | null,
-  requirements: GateRequirements | null,
-): string[] {
+export function missingBodyParts(body: BodyState | null): string[] {
   if (body === null || !body.present) return [];
   const v = body.landmarkVisibility;
   const min = GATE.minVisibility;
   const parts: string[] = [];
   if (v.leftShoulder < min || v.rightShoulder < min) parts.push('shoulders');
   if (v.leftHip < min || v.rightHip < min) parts.push('hips');
-  if (
-    requirements !== null &&
-    requirements.requireKnees &&
-    (v.leftKnee < min || v.rightKnee < min)
-  ) {
-    parts.push('knees');
-  }
   return parts;
 }
 
@@ -188,11 +171,10 @@ function joinParts(parts: readonly string[]): string {
  */
 function noBodyMessage(
   body: BodyState | null,
-  requirements: GateRequirements | null,
   hadUsableBefore: boolean,
 ): string {
   if (body !== null && body.present) {
-    const parts = missingBodyParts(body, requirements);
+    const parts = missingBodyParts(body);
     if (parts.length > 0) {
       return `I can't see your ${joinParts(parts)} — step back`;
     }
@@ -252,8 +234,8 @@ export function shouldShowGateBanner(options: {
  *   period — a frozen feed must never keep the game running.
  * - Body usable for the activity: open, and `lastUsableMs` advances to
  *   `nowMs`. Usability is judged by `options.requirements` when
- *   provided (per-activity), otherwise by the global `bodyUsable`
- *   (swing rule: shoulders + hips + knees).
+ *   provided (per-activity grace), otherwise by the global `bodyUsable`
+ *   — both are the same shoulders + hips rule since v3.7.
  * - Body not usable and never usable: gated immediately (a game started
  *   with no usable pose must not start its simulation).
  * - Body lost mid-game: gated only once the activity's grace period
@@ -261,7 +243,8 @@ export function shouldShowGateBanner(options: {
  *   frame never pauses.
  *
  * The 'no-body' message names the missing landmarks when the gate can
- * see them (shoulders / hips / knees), so the player knows what to fix.
+ * see them (shoulders / hips), so the player knows what to fix.
+ * Knees are never named: they are not a gate input (v3.7).
  */
 export function evaluateGate(
   body: BodyState | null,
@@ -328,7 +311,7 @@ export function evaluateGate(
 
   const usable =
     requirements !== undefined
-      ? bodyUsableForActivity(body, requirements)
+      ? bodyUsableForActivity(body)
       : (body !== null && body.bodyUsable);
   if (usable) {
     return { gated: false, reason: 'open', message: '', lastUsableMs: nowMs };
@@ -338,7 +321,7 @@ export function evaluateGate(
     return {
       gated: true,
       reason: 'no-body',
-      message: noBodyMessage(body, requirements ?? null, false),
+      message: noBodyMessage(body, false),
       lastUsableMs,
     };
   }
@@ -348,7 +331,7 @@ export function evaluateGate(
   return {
     gated: true,
     reason: 'no-body',
-    message: noBodyMessage(body, requirements ?? null, true),
+    message: noBodyMessage(body, true),
     lastUsableMs,
   };
 }

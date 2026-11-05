@@ -765,6 +765,14 @@ function main(): void {
   }
 
   canvas.addEventListener('pointermove', (event) => {
+    // The hub is pointer-driven: while it is open, moves track the
+    // hovered button (v3.3) and must not steer the sim body — this
+    // branch runs for every source, not just the mouse sim.
+    if (townHub.isOpen) {
+      const pixel = pointerToCanvasPx(event);
+      if (pixel !== null) townHub.handlePointerMove(pixel.x, pixel.y);
+      return;
+    }
     if (activeSource !== mouse) return;
     const pixel = pointerToCanvasPx(event);
     if (pixel === null) return;
@@ -775,15 +783,21 @@ function main(): void {
       button,
     );
   });
+  // Pointer leaving the canvas clears any hovered hub button.
+  canvas.addEventListener('pointerleave', () => {
+    if (townHub.isOpen) townHub.handlePointerMove(-1, -1);
+  });
   canvas.addEventListener('pointerdown', (event) => {
     sfx.unlock();
     // The town hub is a modal menu: while it is open, taps belong to
     // it and are swallowed here — they must not also steer the sim
     // body. (The games' own canvas listeners are also guarded on
     // `paused`, so a tap cannot reach a chip underneath the hub.)
+    // Down arms the pressed state (v3.3); up activates on release
+    // over the same button.
     if (townHub.isOpen) {
       const pixel = pointerToCanvasPx(event);
-      if (pixel !== null) townHub.handlePointer(pixel.x, pixel.y);
+      if (pixel !== null) townHub.handlePointerDown(pixel.x, pixel.y);
       return;
     }
     if (activeSource !== mouse) return;
@@ -796,6 +810,13 @@ function main(): void {
     );
   });
   canvas.addEventListener('pointerup', (event) => {
+    // Release over the same hub button activates it (v3.3); a
+    // release elsewhere cancels the press.
+    if (townHub.isOpen) {
+      const pixel = pointerToCanvasPx(event);
+      if (pixel !== null) townHub.handlePointerUp(pixel.x, pixel.y);
+      return;
+    }
     if (activeSource !== mouse) return;
     const pixel = pointerToCanvasPx(event);
     if (pixel === null) return;

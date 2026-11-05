@@ -13,15 +13,18 @@
 import { describe, expect, it } from 'vitest';
 import { OUTFIT } from '../core/config';
 import { makePose } from '../core/poseFixture';
+import { PoseLandmark, type NormalizedLandmark } from '../tracking/poseTypes';
 import {
   AvatarRenderer,
   avatarJoints,
+  bottomsGeometry,
   faceGeometry,
   hardHatGeometry,
   headGeometry,
   headRadiusPx,
   limbWidthPx,
   resolveOutfit,
+  torsoGeometry,
 } from './avatar';
 import { toCanvas } from './stage';
 
@@ -236,6 +239,264 @@ describe('hardHatGeometry + faceGeometry (v3.2: eyes under the hat)', () => {
   });
 });
 
+describe('torsoGeometry (v3.3: torso follows the shoulder line)', () => {
+  /** A pose leaning to one side: left shoulder/hip raised, right lowered. */
+  function tiltedPose(): NormalizedLandmark[] {
+    const pose = makePose();
+    const tilt = 0.04;
+    const shift = (index: number, dy: number): void => {
+      const entry = pose[index];
+      if (entry === undefined) throw new Error('fixture pose incomplete');
+      entry.y += dy;
+    };
+    shift(PoseLandmark.LEFT_SHOULDER, -tilt);
+    shift(PoseLandmark.RIGHT_SHOULDER, tilt);
+    shift(PoseLandmark.LEFT_HIP, -tilt);
+    shift(PoseLandmark.RIGHT_HIP, tilt);
+    return pose;
+  }
+
+  it('top edge equals the shoulder landmarks, tilted the same way — not horizontal', () => {
+    const joints = avatarJoints(tiltedPose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = torsoGeometry(joints);
+    expect(g.topLeft).toEqual(joints.leftShoulder);
+    expect(g.topRight).toEqual(joints.rightShoulder);
+    // 0.04 normalized each way at 540 px tall = 43.2 px of tilt.
+    expect(g.topLeft.y - g.topRight.y).toBeCloseTo(-43.2, 1);
+    // Same tilt direction as the shoulders themselves.
+    expect(Math.sign(g.topLeft.y - g.topRight.y)).toBe(
+      Math.sign(joints.leftShoulder.y - joints.rightShoulder.y),
+    );
+  });
+
+  it('top edge is level when the shoulders are level', () => {
+    const joints = avatarJoints(makePose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = torsoGeometry(joints);
+    expect(g.topLeft.y).toBeCloseTo(g.topRight.y, 6);
+  });
+
+  it('waist follows the hip line, tapered inward from the hips', () => {
+    const joints = avatarJoints(tiltedPose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = torsoGeometry(joints);
+    // Waist edge parallel to the hip line (cross product ~ 0).
+    const cross =
+      (g.waistRight.x - g.waistLeft.x) * (joints.rightHip.y - joints.leftHip.y) -
+      (g.waistRight.y - g.waistLeft.y) * (joints.rightHip.x - joints.leftHip.x);
+    expect(Math.abs(cross)).toBeLessThan(1);
+    // Same tilt direction as the hips.
+    expect(Math.sign(g.waistLeft.y - g.waistRight.y)).toBe(
+      Math.sign(joints.leftHip.y - joints.rightHip.y),
+    );
+    // Tapered: waist is 0.82x the hip width, so the waist points sit
+    // between the hips and the hip midpoint.
+    const hipWidth = Math.hypot(
+      joints.rightHip.x - joints.leftHip.x,
+      joints.rightHip.y - joints.leftHip.y,
+    );
+    const waistWidth = Math.hypot(
+      g.waistRight.x - g.waistLeft.x,
+      g.waistRight.y - g.waistLeft.y,
+    );
+    expect(waistWidth / hipWidth).toBeCloseTo(0.82, 6);
+    const hipMid = {
+      x: (joints.leftHip.x + joints.rightHip.x) / 2,
+      y: (joints.leftHip.y + joints.rightHip.y) / 2,
+    };
+    expect(
+      Math.hypot(g.waistLeft.x - hipMid.x, g.waistLeft.y - hipMid.y),
+    ).toBeLessThan(hipWidth / 2);
+  });
+
+  it('neckline scoop dips below the shoulder line, centred on the neck, clear of the chin', () => {
+    const joints = avatarJoints(makePose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = torsoGeometry(joints);
+    // 0.09 torso lengths on the sim body (torso 162 px).
+    expect(g.scoopDepth).toBeCloseTo(joints.torsoLengthPx * 0.09, 6);
+    expect(g.scoopDepth).toBeGreaterThan(0);
+    // Bounded: nowhere near the waist, a full torso length below.
+    expect(g.scoopDepth).toBeLessThan(joints.torsoLengthPx * 0.2);
+    // Centred on the neck/shoulder midpoint, below the shoulder line.
+    expect(g.scoopBottom.x).toBeCloseTo(g.neckMid.x, 6);
+    expect(g.scoopBottom.y).toBeGreaterThan(g.neckMid.y);
+    expect(g.scoopBottom.y - g.neckMid.y).toBeCloseTo(g.scoopDepth, 6);
+    // The chin overlaps the torso top by 0.45 * headR; the scoop stays
+    // above the chin line so it never cuts into the face.
+    const headR = headRadiusPx(joints.torsoLengthPx);
+    expect(g.scoopDepth).toBeLessThan(0.45 * headR);
+    // The scoop control point sits 2x the depth below the neck, so the
+    // drawn quadratic bottoms out exactly at the scoop bottom.
+    expect(g.scoopControl.y - g.neckMid.y).toBeCloseTo(g.scoopDepth * 2, 6);
+  });
+
+  it('armholes pull the sides inward below the shoulders', () => {
+    const joints = avatarJoints(makePose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = torsoGeometry(joints);
+    expect(g.armholeInset).toBeGreaterThan(0);
+    expect(g.armholeInset).toBeCloseTo(joints.shoulderWidthPx * 0.08, 6);
+    // Each side control point sits inside the straight shoulder-to-waist
+    // line — closer to the torso centreline than the line's midpoint.
+    const centreX = g.neckMid.x;
+    for (const [control, top] of [
+      [g.leftSideControl, g.topLeft],
+      [g.rightSideControl, g.topRight],
+    ] as const) {
+      const midX = (top.x + (top === g.topLeft ? g.waistLeft.x : g.waistRight.x)) / 2;
+      expect(Math.abs(control.x - centreX)).toBeLessThan(Math.abs(midX - centreX));
+    }
+  });
+
+  it('straps sit inside the shoulder band, thin, and never cross the midline', () => {
+    const joints = avatarJoints(makePose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = torsoGeometry(joints);
+    // Half v3.2's 0.07-torso width — thin enough to read as a strap.
+    expect(g.strapLeft.width).toBeCloseTo(joints.torsoLengthPx * 0.035, 6);
+    expect(g.strapLeft.width).toBeLessThan(joints.torsoLengthPx * 0.07);
+    expect(g.strapRight.width).toBe(g.strapLeft.width);
+    // 0.18 shoulder widths long, starting just inside the corner.
+    const strapLen = Math.hypot(
+      g.strapLeft.b.x - g.strapLeft.a.x,
+      g.strapLeft.b.y - g.strapLeft.a.y,
+    );
+    expect(strapLen).toBeCloseTo(joints.shoulderWidthPx * 0.18, 6);
+    // Both endpoints within the shoulder-to-neck span (t in [0, 0.5)
+    // from the shoulder toward the neck) and on the shoulder's own
+    // side of the midline — no strap crosses the chest centre.
+    const shoulderDir = {
+      x: (joints.rightShoulder.x - joints.leftShoulder.x) / joints.shoulderWidthPx,
+      y: (joints.rightShoulder.y - joints.leftShoulder.y) / joints.shoulderWidthPx,
+    };
+    for (const [strap, shoulder, inward, sign] of [
+      [g.strapLeft, joints.leftShoulder, shoulderDir, -1],
+      [g.strapRight, joints.rightShoulder, { x: -shoulderDir.x, y: -shoulderDir.y }, 1],
+    ] as const) {
+      for (const p of [strap.a, strap.b]) {
+        const along =
+          (p.x - shoulder.x) * inward.x + (p.y - shoulder.y) * inward.y;
+        expect(along).toBeGreaterThanOrEqual(0);
+        expect(along).toBeLessThan(joints.shoulderWidthPx * 0.5);
+        // Same side of the neck midpoint as its shoulder.
+        const side =
+          (p.x - g.neckMid.x) * shoulderDir.x + (p.y - g.neckMid.y) * shoulderDir.y;
+        expect(Math.sign(side)).toBe(sign);
+      }
+    }
+  });
+});
+
+describe('bottomsGeometry (v3.3: two cuffs with a notch)', () => {
+  it('two cuffs share one crotch point, above the cuff bottoms — a notch, not a straight edge', () => {
+    const joints = avatarJoints(makePose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = bottomsGeometry(joints);
+    expect(g.left.crotch).toEqual(g.right.crotch);
+    expect(g.crotch).toEqual(g.left.crotch);
+    // The crotch sits above every cuff bottom corner (canvas y-down).
+    for (const cuff of [g.left, g.right]) {
+      expect(g.crotch.y).toBeLessThan(cuff.bottomInner.y);
+      expect(g.crotch.y).toBeLessThan(cuff.bottomOuter.y);
+      expect(g.crotch.y).toBeLessThan(cuff.bottomMid.y);
+    }
+    // And above the line joining the two outer bottom corners, by a
+    // clear margin — the bottom silhouette is a V, not one straight line.
+    const t =
+      (g.crotch.x - g.left.bottomOuter.x) /
+      (g.right.bottomOuter.x - g.left.bottomOuter.x);
+    const lineY =
+      g.left.bottomOuter.y +
+      t * (g.right.bottomOuter.y - g.left.bottomOuter.y);
+    expect(lineY - g.crotch.y).toBeGreaterThan(10);
+    // The two cuffs are genuinely separate: their bottoms are apart.
+    expect(
+      Math.hypot(
+        g.right.bottomMid.x - g.left.bottomMid.x,
+        g.right.bottomMid.y - g.left.bottomMid.y,
+      ),
+    ).toBeGreaterThan(50);
+  });
+
+  it('each cuff follows its thigh: bottom edge on the thigh, perpendicular, partway down', () => {
+    const joints = avatarJoints(makePose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = bottomsGeometry(joints);
+    for (const [cuff, hip, knee] of [
+      [g.left, joints.leftHip, joints.leftKnee],
+      [g.right, joints.rightHip, joints.rightKnee],
+    ] as const) {
+      const thighLen = Math.hypot(knee.x - hip.x, knee.y - hip.y);
+      const thighDir = {
+        x: (knee.x - hip.x) / thighLen,
+        y: (knee.y - hip.y) / thighLen,
+      };
+      // Hip -> bottomMid runs along the thigh (angle ~ 0).
+      const toBottom = {
+        x: cuff.bottomMid.x - hip.x,
+        y: cuff.bottomMid.y - hip.y,
+      };
+      const along = toBottom.x * thighDir.x + toBottom.y * thighDir.y;
+      const cross = toBottom.x * thighDir.y - toBottom.y * thighDir.x;
+      expect(Math.atan2(Math.abs(cross), along)).toBeLessThan(0.09);
+      // Bottom edge midpoint is 0.55 of the way down the thigh.
+      expect(cuff.depthFrac).toBeCloseTo(0.55, 6);
+      expect(along / thighLen).toBeCloseTo(0.55, 6);
+      // Bottom edge is (near-)perpendicular to the thigh.
+      const edgeLen = Math.hypot(
+        cuff.bottomOuter.x - cuff.bottomInner.x,
+        cuff.bottomOuter.y - cuff.bottomInner.y,
+      );
+      const edgeDot =
+        ((cuff.bottomOuter.x - cuff.bottomInner.x) * thighDir.x +
+          (cuff.bottomOuter.y - cuff.bottomInner.y) * thighDir.y) /
+        edgeLen;
+      expect(Math.abs(edgeDot)).toBeLessThan(0.15);
+      // Cuff axis is the thigh direction.
+      expect(Math.abs(cuff.axis.x - thighDir.x)).toBeLessThan(0.01);
+      expect(Math.abs(cuff.axis.y - thighDir.y)).toBeLessThan(0.01);
+    }
+  });
+
+  it('hearts live on each cuff, on the thigh axis inside the cuff', () => {
+    const joints = avatarJoints(makePose(), 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const g = bottomsGeometry(joints);
+    for (const [cuff, hip, knee] of [
+      [g.left, joints.leftHip, joints.leftKnee],
+      [g.right, joints.rightHip, joints.rightKnee],
+    ] as const) {
+      expect(cuff.heartCentres).toHaveLength(2);
+      const thighLen = Math.hypot(knee.x - hip.x, knee.y - hip.y);
+      for (const heart of cuff.heartCentres) {
+        // On the thigh axis...
+        const cross =
+          (heart.x - hip.x) * (knee.y - hip.y) -
+          (heart.y - hip.y) * (knee.x - hip.x);
+        expect(Math.abs(cross) / thighLen).toBeLessThan(1);
+        // ...between the hip and the cuff bottom.
+        const frac =
+          ((heart.x - hip.x) * (knee.x - hip.x) +
+            (heart.y - hip.y) * (knee.y - hip.y)) /
+          (thighLen * thighLen);
+        expect(frac).toBeGreaterThan(0.1);
+        expect(frac).toBeLessThan(cuff.depthFrac);
+      }
+    }
+  });
+});
+
 describe('resolveOutfit', () => {
   it('defaults to the mining outfit (white tank, heart boxers, hard hat)', () => {
     const outfit = resolveOutfit();
@@ -323,5 +584,23 @@ describe('AvatarRenderer.draw', () => {
       // And the eyes sit below the brim bottom in the visible band.
       expect(arcs[i]?.y ?? 0).toBeGreaterThan(hat.brimBottomY);
     }
+  });
+
+  it('draws both legs before the bottoms, so the cuffs cover the upper thighs (v3.3)', () => {
+    const renderer = new AvatarRenderer();
+    const { ctx, fillStyles } = recordingContext();
+    const pose = makePose({ leftArmDeg: 10, rightArmDeg: -10 });
+    renderer.draw(ctx, pose, 960, 540, OUTFIT, 1000);
+
+    // fillStyle sets, in draw order: far-arm hand (skin), far-leg foot
+    // (skin), torso (top), near-leg foot (skin), bottoms, hearts, ...
+    const topIdx = fillStyles.indexOf(OUTFIT.top.color);
+    const bottomsIdx = fillStyles.indexOf(OUTFIT.bottoms.color);
+    expect(topIdx).toBeGreaterThanOrEqual(0);
+    expect(bottomsIdx).toBeGreaterThan(topIdx);
+    // A skin fill (the near leg's foot) sits between the torso and the
+    // bottoms — the near leg is drawn before the cuffs, not over them.
+    const between = fillStyles.slice(topIdx + 1, bottomsIdx);
+    expect(between).toContain(OUTFIT.skin.tone);
   });
 });

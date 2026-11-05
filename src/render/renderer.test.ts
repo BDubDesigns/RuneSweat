@@ -10,6 +10,7 @@ import { readFileSync as readFileSyncUntyped } from 'node:fs';
  */
 const readFileSync: (path: string, encoding: 'utf8') => string =
   readFileSyncUntyped as (path: string, encoding: 'utf8') => string;
+import { RENDER } from '../core/config';
 import {
   GATE_BANNER,
   drawBlockingOverlay,
@@ -66,6 +67,94 @@ function recordingContext(width = 960, height = 540): {
   }) as unknown as CanvasRenderingContext2D;
   return { ctx: stub, fills, texts, arcs };
 }
+
+/**
+ * Stub that records the font in effect at measure time and the order
+ * of font-set vs measure calls — the v3.3 regression: drawGateBanner
+ * measured the text before setting its 20px bold font, so the pill
+ * was sized for the leftover font and the text overflowed it.
+ */
+function fontRecordingContext(): {
+  ctx: CanvasRenderingContext2D;
+  /** e.g. 'font:700 20px ...' / 'measure:<text>' in call order. */
+  events: string[];
+  fills: { x: number; y: number; w: number; h: number }[];
+  measured: { text: string; fontAtMeasure: string; width: number }[];
+  drawnFont: string;
+} {
+  const events: string[] = [];
+  const fills: { x: number; y: number; w: number; h: number }[] = [];
+  const measured: { text: string; fontAtMeasure: string; width: number }[] =
+    [];
+  // Whatever the previous draw left behind: a small default font.
+  let font = '10px sans-serif';
+  const drawnFont = `700 ${GATE_BANNER.fontPx}px ${RENDER.gameFont}`;
+  const stub = {
+    get font(): string {
+      return font;
+    },
+    set font(value: string) {
+      font = value;
+      events.push(`font:${value}`);
+    },
+    save(): void {},
+    restore(): void {},
+    fillRect(x: number, y: number, w: number, h: number): void {
+      fills.push({ x, y, w, h });
+    },
+    strokeRect(): void {},
+    fillText(): void {},
+    measureText(text: string): { width: number } {
+      events.push(`measure:${text}`);
+      // Width scales with the font size in effect, like a real
+      // canvas: measuring at the 10px leftover font returns about
+      // half the width of the 20px drawn font.
+      const px = Number(/(\d+)px/.exec(font)?.[1] ?? 10);
+      const widthPx = text.length * px * 0.55;
+      measured.push({ text, fontAtMeasure: font, width: widthPx });
+      return { width: widthPx };
+    },
+  } as unknown as CanvasRenderingContext2D;
+  return { ctx: stub, events, fills, measured, drawnFont };
+}
+
+describe('drawGateBanner measures at the drawn font (v3.3)', () => {
+  it('a long message never clips: the pill is sized at the 20px bold font', () => {
+    const message =
+      "I can't see your knees — step back so I can see your whole body";
+    const rec = fontRecordingContext();
+    drawGateBanner(rec.ctx, 960, 540, message);
+    // The font was set before measureText ran.
+    const fontIdx = rec.events.findIndex(
+      (e) => e === `font:${rec.drawnFont}`,
+    );
+    const measureIdx = rec.events.findIndex((e) =>
+      e.startsWith('measure:'),
+    );
+    expect(fontIdx).toBeGreaterThanOrEqual(0);
+    expect(measureIdx).toBeGreaterThan(fontIdx);
+    // The width the pill was sized from was measured at the drawn font.
+    expect(rec.measured).toHaveLength(1);
+    expect(rec.measured[0]?.fontAtMeasure).toBe(rec.drawnFont);
+    const textWidth = rec.measured[0]?.width ?? 0;
+    // Pill fits the text at the drawn font, plus padding each side.
+    expect(rec.fills).toHaveLength(1);
+    expect(rec.fills[0]?.w).toBe(textWidth + GATE_BANNER.paddingX * 2);
+    expect(rec.fills[0]?.w).toBeGreaterThanOrEqual(textWidth);
+  });
+
+  it('the real gate message fits, and gateBannerRect caps/minimums still hold', () => {
+    const rec = fontRecordingContext();
+    drawGateBanner(rec.ctx, 960, 540, "I can't see your knees — step back");
+    const textWidth = rec.measured[0]?.width ?? 0;
+    expect(rec.fills[0]?.w).toBe(textWidth + GATE_BANNER.paddingX * 2);
+    // A long message caps at the stage width (12 px margin each side).
+    expect(gateBannerRect(960, 2000).w).toBe(960 - 24);
+    expect(gateBannerRect(960, 2000).x).toBe(12);
+    // A short message keeps the minimum width.
+    expect(gateBannerRect(960, 50).w).toBe(GATE_BANNER.minWidth);
+  });
+});
 
 describe('drawGateBanner (v3.2)', () => {
   it('draws a small top pill, never a full-stage dim or a ghost', () => {

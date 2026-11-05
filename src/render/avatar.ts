@@ -12,16 +12,19 @@
  * outfit's bottoms, a simple friendly face, and the outfit's hat. All
  * canvas vector shapes — no external art assets, nothing new to fetch.
  *
- * Draw order: far arm, far leg, torso (top), bottoms, near leg, near
- * arm, head: skin circle, then the hat, then the face. The hat goes
- * BEFORE the face on purpose (v3.2): v3.1 drew the eyes first and the
- * hard-hat dome over them, so every playtest frame showed a smile and
- * no eyes. The face sits in the visible band below the brim.
+ * Draw order: far arm, far leg, torso (top), near leg, bottoms, near
+ * arm, head: skin circle, then the hat, then the face. Both legs go
+ * before the bottoms (v3.3) so the cuffs cover the upper thighs and
+ * the legs emerge from them. The hat goes BEFORE the face on purpose
+ * (v3.2): v3.1 drew the eyes first and the hard-hat dome over them, so
+ * every playtest frame showed a smile and no eyes. The face sits in
+ * the visible band below the brim.
  *
  * Canvas drawing itself is untestable in Node — the pure geometry
  * helpers below (`avatarJoints`, `limbWidthPx`, `headRadiusPx`,
- * `resolveOutfit`) carry the unit tests; the `draw()` path is verified
- * by typecheck + build + a real-device playtest.
+ * `resolveOutfit`, `torsoGeometry`, `bottomsGeometry`) carry the unit
+ * tests; the `draw()` path is verified by typecheck + build + a
+ * real-device playtest.
  */
 
 import { AVATAR, OUTFIT, type AvatarOutfit } from '../core/config';
@@ -231,6 +234,244 @@ export function resolveOutfit(
   };
 }
 
+/** Tiny 2D vector helpers for the geometry builders below. */
+function vAdd(a: Vec2, b: Vec2): Vec2 {
+  return { x: a.x + b.x, y: a.y + b.y };
+}
+function vSub(a: Vec2, b: Vec2): Vec2 {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+function vScale(a: Vec2, s: number): Vec2 {
+  return { x: a.x * s, y: a.y * s };
+}
+function vLen(a: Vec2): number {
+  return Math.hypot(a.x, a.y);
+}
+function vUnit(a: Vec2): Vec2 {
+  const len = vLen(a);
+  return len < 1e-6 ? { x: 0, y: 1 } : vScale(a, 1 / len);
+}
+function vMid(a: Vec2, b: Vec2): Vec2 {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+function vDot(a: Vec2, b: Vec2): number {
+  return a.x * b.x + a.y * b.y;
+}
+/** Rotate 90° counter-clockwise (canvas y-down: this is "left" of the vector). */
+function vPerp(a: Vec2): Vec2 {
+  return { x: -a.y, y: a.x };
+}
+
+/** Canvas-space tank-top strap: a short strip on the shoulder line. */
+export interface StrapGeometry {
+  /** Outer end, at the shoulder (pulled slightly inward from the corner). */
+  a: Vec2;
+  /** Inner end, toward the neck along the shoulder line. */
+  b: Vec2;
+  /** Strip width, canvas px. */
+  width: number;
+}
+
+/** Canvas-space torso geometry for a pose. */
+export interface TorsoGeometry {
+  /** Top edge endpoints — exactly the shoulder landmarks. */
+  topLeft: Vec2;
+  topRight: Vec2;
+  /** Waist endpoints — on the hip line, tapered inward from the hips. */
+  waistLeft: Vec2;
+  waistRight: Vec2;
+  /** Midpoint of the shoulder line — the neck centre. */
+  neckMid: Vec2;
+  /** How far the neckline dips below the shoulder line at the neck. */
+  scoopDepth: number;
+  /** Deepest point of the neckline scoop. */
+  scoopBottom: Vec2;
+  /**
+   * Quadratic control point for the scoop curve, `2 * scoopDepth`
+   * below the neck line — a quadratic's midpoint sits halfway between
+   * its endpoints' midpoint and its control point, so this makes the
+   * drawn curve bottom out exactly at `scoopBottom`.
+   */
+  scoopControl: Vec2;
+  /** How far the side control points pull inward from the straight shoulder-to-waist line. */
+  armholeInset: number;
+  /** Quadratic control points for the side curves (top -> waist). */
+  leftSideControl: Vec2;
+  rightSideControl: Vec2;
+  strapLeft: StrapGeometry;
+  strapRight: StrapGeometry;
+}
+
+/**
+ * Pure: torso geometry for a pose (v3.3).
+ *
+ * The top edge IS the shoulder line — from the actual leftShoulder
+ * landmark to the actual rightShoulder landmark, tilted however the
+ * body leans, so the arms anchor exactly at the torso's top corners.
+ * The waist end follows the hip line the same way, tapered inward
+ * (waist half-width `0.82` of hip half-width — v3.2's slab was `0.9`).
+ * The neckline scoop is cut INTO the top edge: the edge dips
+ * `0.09` torso lengths below the shoulder line at the neck. That
+ * stays clear of the chin — the chin sits `0.45 * headR` = `0.108`
+ * torso lengths below the shoulder line, so the scoop bottoms out
+ * ~0.018 torso lengths above it and never cuts into the face. The
+ * sides curve inward below the shoulders (armholes), pulled
+ * `0.08` shoulder widths in from the straight shoulder-to-waist line.
+ * Straps are short thin strips ON the shoulder line, running
+ * shoulder-to-neck: `0.18` shoulder widths long, `0.035` torso
+ * lengths wide — half v3.2's `0.07` width, which is what made them
+ * read as white lines — centred just above the top edge so they sit
+ * on the shoulder without crossing the chest.
+ */
+export function torsoGeometry(j: AvatarJoints): TorsoGeometry {
+  const shoulderDir = vUnit(vSub(j.rightShoulder, j.leftShoulder));
+  const neckMid = vMid(j.leftShoulder, j.rightShoulder);
+  const hipDir = vUnit(vSub(j.rightHip, j.leftHip));
+  const hipMid = vMid(j.leftHip, j.rightHip);
+  const hipHalf = vLen(vSub(j.rightHip, j.leftHip)) / 2;
+  const waistHalf = hipHalf * 0.82;
+  const waistLeft = vAdd(hipMid, vScale(hipDir, -waistHalf));
+  const waistRight = vAdd(hipMid, vScale(hipDir, waistHalf));
+  // "Down" for this body: perpendicular to the shoulder line, pointing
+  // toward the hips (canvas y-down, so usually +y, but follow the lean).
+  const perp = vPerp(shoulderDir);
+  const down = vDot(perp, vSub(hipMid, neckMid)) >= 0 ? perp : vScale(perp, -1);
+  const up = vScale(down, -1);
+  const scoopDepth = j.torsoLengthPx * 0.09;
+  const scoopBottom = vAdd(neckMid, vScale(down, scoopDepth));
+  const scoopControl = vAdd(neckMid, vScale(down, scoopDepth * 2));
+  const armholeInset = j.shoulderWidthPx * 0.08;
+  // Side curves: the midpoint of the straight shoulder-to-waist line,
+  // pulled toward the torso centreline by the armhole inset.
+  const centreMid = vMid(neckMid, hipMid);
+  const sideControl = (top: Vec2, waist: Vec2): Vec2 => {
+    const mid = vMid(top, waist);
+    return vAdd(mid, vScale(vUnit(vSub(centreMid, mid)), armholeInset));
+  };
+  const leftSideControl = sideControl(j.leftShoulder, waistLeft);
+  const rightSideControl = sideControl(j.rightShoulder, waistRight);
+  // Straps: along the shoulder line from each shoulder toward the neck,
+  // centred a little above the top edge so they sit on the shoulder.
+  const strapWidth = j.torsoLengthPx * 0.035;
+  const strapOffset = vScale(up, strapWidth * 0.35);
+  const strapLen = j.shoulderWidthPx * 0.18;
+  const strapInset = j.shoulderWidthPx * 0.02;
+  const strap = (shoulder: Vec2, dir: Vec2): StrapGeometry => {
+    const a = vAdd(vAdd(shoulder, vScale(dir, strapInset)), strapOffset);
+    const b = vAdd(a, vScale(dir, strapLen));
+    return { a, b, width: strapWidth };
+  };
+  return {
+    topLeft: j.leftShoulder,
+    topRight: j.rightShoulder,
+    waistLeft,
+    waistRight,
+    neckMid,
+    scoopDepth,
+    scoopBottom,
+    scoopControl,
+    armholeInset,
+    leftSideControl,
+    rightSideControl,
+    strapLeft: strap(j.leftShoulder, shoulderDir),
+    strapRight: strap(j.rightShoulder, vScale(shoulderDir, -1)),
+  };
+}
+
+/** Canvas-space geometry for one boxer leg cuff. */
+export interface CuffGeometry {
+  side: 'left' | 'right';
+  /** Top edge endpoints, on the (lifted) hip line. */
+  topOuter: Vec2;
+  topInner: Vec2;
+  /** The crotch point, shared by both cuffs, above the cuff bottoms. */
+  crotch: Vec2;
+  /** Bottom edge endpoints, partway down the thigh. */
+  bottomInner: Vec2;
+  bottomOuter: Vec2;
+  /** Midpoint of the bottom edge — on the thigh, partway down. */
+  bottomMid: Vec2;
+  /** Unit vector from the hip to the bottom edge midpoint (the thigh direction). */
+  axis: Vec2;
+  /** |hip -> bottomMid| as a fraction of hip -> knee length. */
+  depthFrac: number;
+  /** Heart pattern centres, on the thigh axis inside the cuff. */
+  heartCentres: Vec2[];
+}
+
+/** Canvas-space bottoms geometry for a pose: two cuffs + a shared crotch. */
+export interface BottomsGeometry {
+  left: CuffGeometry;
+  right: CuffGeometry;
+  /** The shared crotch point. */
+  crotch: Vec2;
+}
+
+/**
+ * Pure: bottoms geometry for a pose (v3.3).
+ *
+ * Two leg cuffs, one per thigh — not one slab. Each cuff is a pentagon
+ * whose top edge runs from its hip to the shared waistband centre
+ * (the hip line, lifted `0.04` torso lengths so the waistband overlaps
+ * the torso), whose inner edge bends through the shared crotch point
+ * (`0.10` torso lengths below the hip line, along the average thigh
+ * direction), and whose bottom edge sits `0.55` of the way down the
+ * thigh, perpendicular to it, `0.13` shoulder widths to each side of
+ * the thigh axis — wider than the leg capsule, so the leg emerges
+ * from the cuff instead of painting over it. The crotch sits well
+ * above the cuff bottoms, so the bottom silhouette is a V notch, not
+ * a straight line. Hearts: two per cuff, on the thigh axis at `0.20`
+ * and `0.40` of the way down.
+ */
+export function bottomsGeometry(j: AvatarJoints): BottomsGeometry {
+  const hipMid = vMid(j.leftHip, j.rightHip);
+  const hipDir = vUnit(vSub(j.rightHip, j.leftHip));
+  // "Up" for this body: perpendicular to the hip line, away from the knees.
+  const perp = vPerp(hipDir);
+  const up = vDot(perp, vSub(j.leftKnee, hipMid)) >= 0 ? vScale(perp, -1) : perp;
+  const lift = j.torsoLengthPx * 0.04;
+  const topInner = vAdd(hipMid, vScale(up, lift));
+  // Crotch: below the hip line along the average thigh direction.
+  const avgThighDir = vUnit(
+    vAdd(
+      vUnit(vSub(j.leftKnee, j.leftHip)),
+      vUnit(vSub(j.rightKnee, j.rightHip)),
+    ),
+  );
+  const crotch = vAdd(hipMid, vScale(avgThighDir, j.torsoLengthPx * 0.1));
+  const cuff = (side: 'left' | 'right'): CuffGeometry => {
+    const hip = side === 'left' ? j.leftHip : j.rightHip;
+    const knee = side === 'left' ? j.leftKnee : j.rightKnee;
+    const thigh = vSub(knee, hip);
+    const thighLen = vLen(thigh);
+    const thighDir = vUnit(thigh);
+    const depthFrac = 0.55;
+    const bottomMid = vAdd(hip, vScale(thighDir, thighLen * depthFrac));
+    // Outward from the thigh axis, away from the body midline.
+    const outPerp = vPerp(thighDir);
+    const outward =
+      vDot(outPerp, vSub(hip, hipMid)) >= 0 ? outPerp : vScale(outPerp, -1);
+    const halfW = j.shoulderWidthPx * 0.13;
+    const bottomOuter = vAdd(bottomMid, vScale(outward, halfW));
+    const bottomInner = vAdd(bottomMid, vScale(outward, -halfW));
+    return {
+      side,
+      topOuter: vAdd(hip, vScale(up, lift)),
+      topInner,
+      crotch,
+      bottomInner,
+      bottomOuter,
+      bottomMid,
+      axis: thighDir,
+      depthFrac,
+      heartCentres: [0.2, 0.4].map((f) =>
+        vAdd(hip, vScale(thighDir, thighLen * f)),
+      ),
+    };
+  };
+  return { left: cuff('left'), right: cuff('right'), crotch };
+}
+
 /** Draw a thick round-capped segment — the limb primitive. */
 function capsule(
   ctx: CanvasRenderingContext2D,
@@ -303,11 +544,14 @@ export class AvatarRenderer {
     ctx.save();
     ctx.lineJoin = 'round';
     // Far side first, near side last — the near limbs overlap the torso.
+    // Both legs go BEFORE the bottoms (v3.3): the cuffs are drawn over
+    // the upper thighs, so the legs emerge from the cuffs instead of
+    // painting a skin stripe down the middle of the near cuff.
     this.drawArm(ctx, sm, 'left', limbW, resolved.skin.tone);
     this.drawLeg(ctx, sm, 'left', limbW, resolved.skin.tone);
-    this.drawTorso(ctx, sm, joints, resolved);
-    this.drawBottoms(ctx, sm, joints, resolved);
+    this.drawTorso(ctx, sm, resolved);
     this.drawLeg(ctx, sm, 'right', limbW, resolved.skin.tone);
+    this.drawBottoms(ctx, sm, resolved);
     this.drawArm(ctx, sm, 'right', limbW, resolved.skin.tone);
     this.drawHead(ctx, sm, headR, resolved);
     ctx.restore();
@@ -380,103 +624,84 @@ export class AvatarRenderer {
   }
 
   /**
-   * Torso in the outfit's top: a tapered rounded shape, wide at the
-   * shoulders, narrower at the waist. The tank's straps run from the
-   * shoulders up toward the neck.
+   * Torso in the outfit's top (v3.3): a tank top whose top edge IS the
+   * shoulder line, so the arms anchor at its top corners whatever the
+   * lean; the neckline scoop is cut into the top edge between the
+   * straps (no skin ellipse stamped on top); the sides curve inward
+   * below the shoulders (armholes); the waist follows the hip line,
+   * tapered. Straps are short thin strips on the shoulder line.
    */
   private drawTorso(
     ctx: CanvasRenderingContext2D,
     j: AvatarJoints,
-    raw: AvatarJoints,
     outfit: AvatarOutfit,
   ): void {
-    const waistHalf = raw.shoulderWidthPx * 0.36;
-    const shoulderHalf = raw.shoulderWidthPx * 0.5;
-    const midX =
-      (j.leftShoulder.x + j.rightShoulder.x) / 2;
-    const shoulderY =
-      (j.leftShoulder.y + j.rightShoulder.y) / 2;
-    const hipY = (j.leftHip.y + j.rightHip.y) / 2;
+    const g = torsoGeometry(j);
     ctx.fillStyle = outfit.top.color;
     ctx.beginPath();
-    ctx.moveTo(midX - shoulderHalf, shoulderY);
-    ctx.lineTo(midX + shoulderHalf, shoulderY);
+    ctx.moveTo(g.topLeft.x, g.topLeft.y);
+    ctx.lineTo(g.strapLeft.b.x, g.strapLeft.b.y);
+    // Scoop: quadratic between the strap inner ends, bottoming out at
+    // scoopBottom (the control point sits 2x the depth below the neck).
     ctx.quadraticCurveTo(
-      midX + waistHalf + 6,
-      (shoulderY + hipY) / 2,
-      midX + waistHalf,
-      hipY,
+      g.scoopControl.x,
+      g.scoopControl.y,
+      g.strapRight.b.x,
+      g.strapRight.b.y,
     );
-    ctx.lineTo(midX - waistHalf, hipY);
+    ctx.lineTo(g.topRight.x, g.topRight.y);
     ctx.quadraticCurveTo(
-      midX - waistHalf - 6,
-      (shoulderY + hipY) / 2,
-      midX - shoulderHalf,
-      shoulderY,
+      g.rightSideControl.x,
+      g.rightSideControl.y,
+      g.waistRight.x,
+      g.waistRight.y,
+    );
+    ctx.lineTo(g.waistLeft.x, g.waistLeft.y);
+    ctx.quadraticCurveTo(
+      g.leftSideControl.x,
+      g.leftSideControl.y,
+      g.topLeft.x,
+      g.topLeft.y,
     );
     ctx.closePath();
     ctx.fill();
     if (outfit.top.style === 'tank') {
-      // Straps over the shoulders, up toward the neck.
-      const strapW = raw.torsoLengthPx * 0.07;
-      for (const shoulder of [j.leftShoulder, j.rightShoulder]) {
-        capsule(
-          ctx,
-          { x: shoulder.x, y: shoulder.y - strapW * 0.4 },
-          {
-            x: shoulder.x + (midX - shoulder.x) * 0.25,
-            y: shoulder.y - raw.torsoLengthPx * 0.14,
-          },
-          strapW,
-          outfit.top.strapColor,
-        );
+      // Straps on the shoulder line, shoulder-to-neck — never diagonal
+      // across the chest, never past the torso midline.
+      for (const strap of [g.strapLeft, g.strapRight]) {
+        capsule(ctx, strap.a, strap.b, strap.width, outfit.top.strapColor);
       }
-      // Scooped neckline: skin shows between the straps.
-      ctx.fillStyle = outfit.skin.tone;
-      ctx.beginPath();
-      ctx.ellipse(midX, shoulderY - 2, shoulderHalf * 0.42, raw.torsoLengthPx * 0.07, 0, 0, Math.PI * 2);
-      ctx.fill();
     }
   }
 
   /**
-   * Bottoms: hips down to mid-thigh, in the outfit's bottoms colour and
-   * pattern. The legs are drawn over the lower edge, so the boxers read
-   * as shorts the legs emerge from.
+   * Bottoms (v3.3): two leg cuffs, one per thigh, meeting at the
+   * crotch — the legs emerge from the cuffs, and the bottom silhouette
+   * is a V notch, not a straight edge. Hearts live on each cuff.
    */
   private drawBottoms(
     ctx: CanvasRenderingContext2D,
     j: AvatarJoints,
-    raw: AvatarJoints,
     outfit: AvatarOutfit,
   ): void {
-    const hipY = (j.leftHip.y + j.rightHip.y) / 2;
-    const midX = (j.leftHip.x + j.rightHip.x) / 2;
-    const halfW = raw.shoulderWidthPx * 0.42;
-    // Mid-thigh: halfway from hips to knees.
-    const legY =
-      (j.leftKnee.y + j.rightKnee.y) / 2;
-    const bottomY = hipY + (legY - hipY) * 0.55;
+    const g = bottomsGeometry(j);
     ctx.fillStyle = outfit.bottoms.color;
-    ctx.beginPath();
-    ctx.moveTo(midX - halfW, hipY - raw.torsoLengthPx * 0.04);
-    ctx.lineTo(midX + halfW, hipY - raw.torsoLengthPx * 0.04);
-    ctx.lineTo(midX + halfW * 0.92, bottomY);
-    ctx.lineTo(midX - halfW * 0.92, bottomY);
-    ctx.closePath();
-    ctx.fill();
+    for (const cuff of [g.left, g.right]) {
+      ctx.beginPath();
+      ctx.moveTo(cuff.topOuter.x, cuff.topOuter.y);
+      ctx.lineTo(cuff.topInner.x, cuff.topInner.y);
+      ctx.lineTo(cuff.crotch.x, cuff.crotch.y);
+      ctx.lineTo(cuff.bottomInner.x, cuff.bottomInner.y);
+      ctx.lineTo(cuff.bottomOuter.x, cuff.bottomOuter.y);
+      ctx.closePath();
+      ctx.fill();
+    }
     if (outfit.bottoms.pattern === 'hearts') {
-      const heartSize = AVATAR.heartSizeTorsoFrac * raw.torsoLengthPx;
+      const heartSize = AVATAR.heartSizeTorsoFrac * j.torsoLengthPx;
       ctx.fillStyle = outfit.bottoms.patternColor;
-      const midY = (hipY + bottomY) / 2;
-      for (const dx of [-0.5, 0, 0.5]) {
-        for (const dy of [-0.22, 0.22]) {
-          traceHeart(
-            ctx,
-            midX + dx * halfW,
-            midY + dy * (bottomY - hipY),
-            heartSize,
-          );
+      for (const cuff of [g.left, g.right]) {
+        for (const centre of cuff.heartCentres) {
+          traceHeart(ctx, centre.x, centre.y, heartSize);
           ctx.fill();
         }
       }

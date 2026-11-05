@@ -188,14 +188,20 @@ export function drawGateBanner(
   height: number,
   message: string,
 ): void {
+  ctx.save();
+  // Font FIRST, then measure (v3.3): the pill width is measured
+  // with this font, so measuring before the font is set sizes the
+  // pill for whatever font the previous draw left behind — the Nov 4
+  // playtest frame showed the text running past the pill edge
+  // ("I can't see your knees — ste").
+  ctx.font = `700 ${GATE_BANNER.fontPx}px ${RENDER.gameFont}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
   const textWidth =
     typeof ctx.measureText === 'function'
       ? ctx.measureText(message).width
       : message.length * (GATE_BANNER.fontPx * 0.55);
   const rect = gateBannerRect(width, textWidth);
-  ctx.save();
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
   // Solid card colour, never translucent: the banner sits over live
   // game art and must read at a glance.
   ctx.fillStyle = '#1f1f33';
@@ -203,7 +209,6 @@ export function drawGateBanner(
   ctx.strokeStyle = '#ffd166';
   ctx.lineWidth = 2;
   ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
-  ctx.font = `700 ${GATE_BANNER.fontPx}px ${RENDER.gameFont}`;
   ctx.fillStyle = '#ffffff';
   ctx.fillText(message, width / 2, rect.y + rect.h / 2);
   ctx.restore();

@@ -27,6 +27,9 @@
  * hub.setReturnLabel('⛏ Back to the mine');  // label of the Back button
  * hub.render(ctx, nowMs);     // draw the town screen; reads the inventory store live
  * hub.handlePointer(x, y);    // canvas-space tap; true when a button was hit
+ * hub.handlePointerMove(x, y);// hover tracking (main.ts forwards pointermove)
+ * hub.handlePointerDown(x, y);// arms the pressed state (sinks the button)
+ * hub.handlePointerUp(x, y);  // activates the pressed button on release over it
  * hub.handleKey(key);         // ' ' / 'Escape' leaves town + calls onLeaveTown; true when handled
  * hub.snapshot();             // { open, screen, resetArmed } — for tests / debug HUD
  * ```
@@ -171,7 +174,294 @@ interface ButtonRect {
   action: string;
 }
 
-const COMING_SOON: readonly string[] = ['⚔️ Combat — coming soon', '🌲 Lumberjack — coming soon'];
+const COMING_SOON: readonly string[] = ['⚔️ Combat — coming soon'];
+
+/**
+ * Shared button look (v3.3): the hub's flat muddy-brown rectangles
+ * read as form fields, not game UI. Every button is now a real game
+ * button — opaque vertical gradient, darker 4px lip at the base,
+ * rounded corners, soft drop shadow — with a clear hierarchy:
+ * primary (big gold: the play actions), secondary (muted slate: Back
+ * / Sell 1), destructive (small, red-tinted: Reset save, so a
+ * wipe-your-save action never competes with the play buttons).
+ * The refiner's Leave chip uses the same painter (secondary style),
+ * so the look is one implementation, not two.
+ */
+export type ButtonVariant = 'primary' | 'secondary' | 'destructive';
+export type ButtonState = 'idle' | 'hover' | 'pressed';
+
+export interface ButtonStyle {
+  /** Gradient top / bottom (idle). */
+  top: string;
+  bottom: string;
+  /** Gradient top / bottom while hovered (brighter). */
+  hoverTop: string;
+  hoverBottom: string;
+  /** Gradient top / bottom while pressed (darker — the button sinks). */
+  pressedTop: string;
+  pressedBottom: string;
+  /** Border colour. */
+  border: string;
+  /** 4px lip at the base (darker than the gradient bottom). */
+  lip: string;
+  /** Label text colour. */
+  text: string;
+}
+
+export const BUTTON_STYLES: Record<ButtonVariant, ButtonStyle> = {
+  primary: {
+    top: '#ffcf5c',
+    bottom: '#dd9a1d',
+    hoverTop: '#ffe08a',
+    hoverBottom: '#f2b53e',
+    pressedTop: '#e5ac33',
+    pressedBottom: '#bd7f14',
+    border: '#8a5a00',
+    lip: '#96630a',
+    text: '#241a05',
+  },
+  secondary: {
+    top: '#34344e',
+    bottom: '#1e1e33',
+    hoverTop: '#45456a',
+    hoverBottom: '#2a2a45',
+    pressedTop: '#282840',
+    pressedBottom: '#171728',
+    border: '#5a5a80',
+    lip: '#12121f',
+    text: '#e8e8f0',
+  },
+  destructive: {
+    top: '#4a232b',
+    bottom: '#33161d',
+    hoverTop: '#5d2c36',
+    hoverBottom: '#401c24',
+    pressedTop: '#3a1b22',
+    pressedBottom: '#281017',
+    border: '#8a4a55',
+    lip: '#1f0d11',
+    text: '#f2a8b0',
+  },
+};
+
+/** Corner radius for buttons (clamped to half the button height). */
+const BUTTON_RADIUS = 12;
+/** Height of the darker lip at the button's base. */
+const BUTTON_LIP_HEIGHT = 4;
+/** How far a pressed button sinks. */
+const BUTTON_PRESS_OFFSET = 2;
+
+/** Rounded-rect path (manual arcs — no roundRect dependency). */
+export function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+): void {
+  const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+/** Split a label's leading emoji/icon from its text ('⛏ Mine' -> ['⛏', 'Mine']). */
+function splitLeadingIcon(label: string): { icon: string; text: string } {
+  const match = /^[^\p{L}\p{N}\s]+/u.exec(label);
+  if (match === null) return { icon: '', text: label };
+  return { icon: match[0], text: label.slice(match[0].length).trimStart() };
+}
+
+/** Text width, with a rough fallback for stub contexts without measureText. */
+function measureTextWidth(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  fontPx: number,
+): number {
+  const metrics =
+    typeof ctx.measureText === 'function' ? ctx.measureText(text) : undefined;
+  if (metrics !== undefined && typeof metrics.width === 'number') {
+    return metrics.width;
+  }
+  return text.length * fontPx * 0.6;
+}
+
+/**
+ * Paint one game button: opaque gradient body over a darker lip,
+ * rounded corners, drop shadow (removed when pressed — the button
+ * sinks 2px instead), and the label with its leading icon drawn
+ * bigger, centred as a group. Primary labels are bold; the icon is
+ * always `fontPx + 8`. Fully opaque throughout — nothing shows
+ * through from behind.
+ */
+export function paintButton(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  label: string,
+  variant: ButtonVariant = 'secondary',
+  state: ButtonState = 'idle',
+  fontPx = 22,
+): void {
+  const style = BUTTON_STYLES[variant];
+  const radius = Math.min(BUTTON_RADIUS, h / 2 - 1);
+  const dy = state === 'pressed' ? BUTTON_PRESS_OFFSET : 0;
+  const by = y + dy;
+  const top =
+    state === 'pressed' ? style.pressedTop : state === 'hover' ? style.hoverTop : style.top;
+  const bottom =
+    state === 'pressed'
+      ? style.pressedBottom
+      : state === 'hover'
+        ? style.hoverBottom
+        : style.bottom;
+  ctx.save();
+  // Drop shadow (pressed: sunk, no shadow). It is cast by the lip
+  // fill below, then cleared so the body + border draw shadow-free.
+  if (state !== 'pressed') {
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+    ctx.shadowBlur = state === 'hover' ? 10 : 6;
+    ctx.shadowOffsetY = state === 'hover' ? 4 : 3;
+  }
+  // Bottom lip: full rounded rect in the lip colour; the gradient
+  // body sits on top of it, leaving a 4px 3D lip at the base.
+  ctx.fillStyle = style.lip;
+  roundRectPath(ctx, x, by, w, h, radius);
+  ctx.fill();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0)';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetY = 0;
+  // Gradient body (stub contexts without createLinearGradient fall
+  // back to the flat top colour — never throws).
+  const gradient = ctx.createLinearGradient(0, by, 0, by + h - BUTTON_LIP_HEIGHT);
+  if (gradient !== null && gradient !== undefined && typeof gradient.addColorStop === 'function') {
+    gradient.addColorStop(0, top);
+    gradient.addColorStop(1, bottom);
+    ctx.fillStyle = gradient;
+  } else {
+    ctx.fillStyle = top;
+  }
+  roundRectPath(ctx, x, by, w, h - BUTTON_LIP_HEIGHT, radius);
+  ctx.fill();
+  // Border.
+  ctx.strokeStyle = style.border;
+  ctx.lineWidth = 2;
+  roundRectPath(ctx, x, by, w, h, radius);
+  ctx.stroke();
+  // Label, centred in the gradient body (above the lip): leading
+  // icon drawn bigger, then the text, centred as a group.
+  const { icon, text } = splitLeadingIcon(label);
+  const textFont = `${variant === 'primary' ? '700 ' : ''}${fontPx}px ${RENDER.gameFont}`;
+  const cy = by + (h - BUTTON_LIP_HEIGHT) / 2;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = style.text;
+  if (icon === '') {
+    ctx.font = textFont;
+    ctx.textAlign = 'center';
+    ctx.fillText(text, x + w / 2, cy);
+  } else {
+    const iconFont = `${fontPx + 8}px ${RENDER.gameFont}`;
+    ctx.font = iconFont;
+    const iconW = measureTextWidth(ctx, icon, fontPx + 8);
+    ctx.font = textFont;
+    const textW = measureTextWidth(ctx, text, fontPx);
+    const gap = 8;
+    let cx = x + (w - (iconW + gap + textW)) / 2;
+    ctx.font = iconFont;
+    ctx.fillText(icon, cx, cy);
+    cx += iconW + gap;
+    ctx.font = textFont;
+    ctx.fillText(text, cx, cy);
+  }
+  ctx.restore();
+}
+
+/** True when two rects overlap (touching edges does not count). */
+export function rectsIntersect(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number },
+): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/**
+ * The bottom button row's rects, both screens: Back to the activity
+ * + Reset save (main), Back to town (shop). Single source of truth
+ * for the renderers AND the skyline's clear zone — the three rects
+ * never move without this moving with them. A fixed 3-tuple, so
+ * indexing one is never undefined.
+ */
+export interface ButtonRowRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+export function bottomButtonRects(
+  width: number,
+  height: number,
+): [ButtonRowRect, ButtonRowRect, ButtonRowRect] {
+  const bottomY = height - 64;
+  return [
+    { x: 24, y: bottomY, w: 320, h: 48 },
+    { x: width - 24 - 240, y: bottomY + 4, w: 240, h: 40 },
+    { x: 24, y: bottomY, w: 220, h: 48 },
+  ];
+}
+
+export interface SkylineHouse {
+  x: number;
+  top: number;
+  w: number;
+  h: number;
+  /** Lit window, or null when it would poke out at a bottom button's edge. */
+  window: { x: number; y: number; w: number; h: number } | null;
+}
+
+/**
+ * Rooftop skyline layout (pure geometry): dark houses with triangular
+ * roofs along the bottom, heights 36–84 px, so the roofs peek above
+ * the bottom button row in the gaps between buttons. A house's lit
+ * window is dropped when it would intersect any bottom button rect —
+ * the gold square peeking out at the Back / Reset buttons' edges is
+ * what this fixes. The house bodies still run to the bottom edge
+ * behind the buttons (the opaque buttons cover them).
+ */
+export function skylineLayout(width: number, height: number): SkylineHouse[] {
+  const houses: SkylineHouse[] = [];
+  const buttons = bottomButtonRects(width, height);
+  let x = 0;
+  let house = 0;
+  while (x < width) {
+    const w = 74 + ((house * 37) % 40);
+    const h = 36 + ((house * 53) % 48);
+    const top = height - h;
+    const window = { x: x + w / 2 - 5, y: top + 14, w: 10, h: 12 };
+    houses.push({
+      x,
+      top,
+      w,
+      h,
+      window: buttons.some((b) => rectsIntersect(window, b)) ? null : window,
+    });
+    x += w + 14;
+    house += 1;
+  }
+  return houses;
+}
+
 
 export class TownHub {
   private readonly callbacks: TownHubCallbacks;
@@ -187,6 +477,16 @@ export class TownHub {
   private returnLabel = '⛏ Back to the mine';
   private buttons: ButtonRect[] = [];
   private readonly images = new Map<string, LoadedImage>();
+  /**
+   * Hover / pressed state for the canvas buttons (v3.3): hovered
+   * brightens, pressed sinks 2px with the shadow removed. Set by
+   * handlePointerMove / handlePointerDown, cleared on pointerup and
+   * whenever the hub opens or closes. main.ts forwards pointermove
+   * while the hub is open; handlePointer (tap) is the down+up pair
+   * for callers that only forward taps.
+   */
+  private hoverAction: string | null = null;
+  private pressedAction: string | null = null;
 
   public constructor(callbacks: TownHubCallbacks) {
     this.callbacks = callbacks;
@@ -201,12 +501,26 @@ export class TownHub {
     this.openFlag = true;
     this.screen = 'main';
     this.resetArmed = false;
+    this.hoverAction = null;
+    this.pressedAction = null;
   }
 
   /** Hide the hub. No callback — the caller resumes the game. */
   public close(): void {
     this.openFlag = false;
     this.resetArmed = false;
+    this.hoverAction = null;
+    this.pressedAction = null;
+  }
+
+  /** Action of the button under the pointer, or null. */
+  public get hoveredButton(): string | null {
+    return this.hoverAction;
+  }
+
+  /** Action of the button being pressed, or null. */
+  public get pressedButton(): string | null {
+    return this.pressedAction;
   }
 
   public get isOpen(): boolean {
@@ -236,22 +550,70 @@ export class TownHub {
     };
   }
 
+  private buttonAt(x: number, y: number): ButtonRect | null {
+    for (const button of this.buttons) {
+      if (x < button.x || x > button.x + button.w || y < button.y || y > button.y + button.h) {
+        continue;
+      }
+      return button;
+    }
+    return null;
+  }
+
   /**
-   * Canvas-space tap. Returns true when a hub button was hit (the
+   * Canvas-space pointer move: tracks which button (if any) the
+   * pointer is over, so the next render draws it hovered. Returns
+   * true when the pointer is over a button.
+   */
+  public handlePointerMove(x: number, y: number): boolean {
+    if (!this.openFlag) return false;
+    const hit = this.buttonAt(x, y);
+    this.hoverAction = hit === null ? null : hit.action;
+    return hit !== null;
+  }
+
+  /**
+   * Canvas-space pointer down: arms the pressed state (the button
+   * draws sunk on the next render); activation happens on
+   * pointerup over the same button. A down that misses every button
+   * disarms the Reset confirm.
+   */
+  public handlePointerDown(x: number, y: number): boolean {
+    if (!this.openFlag) return false;
+    const hit = this.buttonAt(x, y);
+    if (hit === null) {
+      this.resetArmed = false;
+      return false;
+    }
+    this.pressedAction = hit.action;
+    return true;
+  }
+
+  /**
+   * Canvas-space pointer up: activates the pressed button when the
+   * pointer is still over it, then clears the pressed state.
+   * Releasing off the button (or with nothing pressed) cancels.
+   */
+  public handlePointerUp(x: number, y: number): boolean {
+    if (!this.openFlag) return false;
+    const pressed = this.pressedAction;
+    this.pressedAction = null;
+    if (pressed === null) return false;
+    const hit = this.buttonAt(x, y);
+    if (hit === null || hit.action !== pressed) return false;
+    return this.activate(pressed);
+  }
+
+  /**
+   * Canvas-space tap (down + up in one call, for callers that only
+   * forward taps). Returns true when a hub button was hit (the
    * caller should swallow the tap); false when the tap missed
    * everything (a miss also disarms a pending Reset confirm).
    */
   public handlePointer(x: number, y: number): boolean {
     if (!this.openFlag) return false;
-    for (const button of this.buttons) {
-      if (x < button.x || x > button.x + button.w || y < button.y || y > button.y + button.h) {
-        continue;
-      }
-      return this.activate(button.action);
-    }
-    // A tap that missed every button disarms the Reset confirm.
-    this.resetArmed = false;
-    return false;
+    if (!this.handlePointerDown(x, y)) return false;
+    return this.handlePointerUp(x, y);
   }
 
   /**
@@ -318,27 +680,24 @@ export class TownHub {
     // Rooftop skyline along the bottom, behind the buttons: dark
     // houses with lit windows. Heights vary 36–84 px, so the roofs
     // peek above the bottom button row in the gaps between buttons.
-    let x = 0;
-    let house = 0;
-    while (x < width) {
-      const w = 74 + ((house * 37) % 40);
-      const h = 36 + ((house * 53) % 48);
-      const top = height - h;
+    // Windows that would intersect a bottom button rect are dropped
+    // by skylineLayout — no lit square pokes out at a button's edge.
+    for (const house of skylineLayout(width, height)) {
       ctx.fillStyle = '#17172b';
-      ctx.fillRect(x, top, w, h);
+      ctx.fillRect(house.x, house.top, house.w, house.h);
       // Triangular roof.
       ctx.fillStyle = '#1e1e38';
       ctx.beginPath();
-      ctx.moveTo(x - 4, top);
-      ctx.lineTo(x + w / 2, top - 18);
-      ctx.lineTo(x + w + 4, top);
+      ctx.moveTo(house.x - 4, house.top);
+      ctx.lineTo(house.x + house.w / 2, house.top - 18);
+      ctx.lineTo(house.x + house.w + 4, house.top);
       ctx.closePath();
       ctx.fill();
-      // One lit window.
-      ctx.fillStyle = '#ffd166';
-      ctx.fillRect(x + w / 2 - 5, top + 14, 10, 12);
-      x += w + 14;
-      house += 1;
+      // One lit window (unless it would overlap a bottom button).
+      if (house.window !== null) {
+        ctx.fillStyle = '#ffd166';
+        ctx.fillRect(house.window.x, house.window.y, house.window.w, house.window.h);
+      }
     }
   }
 
@@ -412,6 +771,12 @@ export class TownHub {
     );
   }
 
+  /**
+   * One hub button (v3.3): the shared game-button look from
+   * paintButton — gradient, lip, rounded corners, shadow — in the
+   * given variant, drawn hovered / pressed from the pointer state.
+   * The button rect is registered for handlePointer* hit-testing.
+   */
   private drawButton(
     ctx: CanvasRenderingContext2D,
     x: number,
@@ -420,25 +785,17 @@ export class TownHub {
     h: number,
     label: string,
     action: string,
-    opts: { highlight?: boolean; dim?: boolean; fontPx?: number } = {},
+    opts: { variant?: ButtonVariant; fontPx?: number } = {},
   ): void {
     this.buttons.push({ x, y, w, h, action });
-    // Solid fills: the town screen is opaque throughout — no
-    // translucent button over a translucent dim, nothing showing
-    // through from behind. (The highlight is a tint over the solid
-    // town background, which is itself opaque.)
-    ctx.fillStyle = opts.highlight
-      ? 'rgba(255, 209, 102, 0.25)'
-      : '#171724';
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = opts.highlight ? '#ffd166' : 'rgba(232, 232, 240, 0.5)';
-    ctx.lineWidth = opts.highlight ? 3 : 2;
-    ctx.strokeRect(x, y, w, h);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `${opts.fontPx ?? 22}px ${RENDER.gameFont}`;
-    ctx.fillStyle = opts.dim ? '#b9b9d6' : '#e8e8f0';
-    ctx.fillText(label, x + w / 2, y + h / 2);
+    const variant = opts.variant ?? 'secondary';
+    const state: ButtonState =
+      this.pressedAction === action
+        ? 'pressed'
+        : this.hoverAction === action
+          ? 'hover'
+          : 'idle';
+    paintButton(ctx, x, y, w, h, label, variant, state, opts.fontPx ?? 22);
   }
 
   private drawItemIcon(
@@ -522,15 +879,15 @@ export class TownHub {
     ctx.fillText('📍 Activities', rightX, ry);
     ry += 40;
     this.drawButton(
-      ctx, rightX, ry, colW, 52, '⛏ Mine — The Jag', 'mine', { highlight: true },
+      ctx, rightX, ry, colW, 52, '⛏ Mine — The Jag', 'mine', { variant: 'primary' },
     );
     ry += 62;
     this.drawButton(
-      ctx, rightX, ry, colW, 52, '🔥 Refiner — refine ore', 'refiner', { highlight: true },
+      ctx, rightX, ry, colW, 52, '🔥 Refiner — refine ore', 'refiner', { variant: 'primary' },
     );
     ry += 62;
     this.drawButton(
-      ctx, rightX, ry, colW, 52, "🛒 Bix's Shop — sell", 'shop', { highlight: true },
+      ctx, rightX, ry, colW, 52, "🛒 Bix's Shop — sell", 'shop', { variant: 'primary' },
     );
     ry += 62;
     for (const stub of COMING_SOON) {
@@ -541,20 +898,26 @@ export class TownHub {
     }
 
     // BOTTOM: back to the last activity (Space does the same) + reset.
-    const bottomY = height - 64;
-    this.drawButton(ctx, margin, bottomY, 320, 48, `${this.returnLabel} (Space)`, 'leave-town', {
-      highlight: true,
+    // The rects come from bottomButtonRects — the same rects the
+    // skyline's clear zone is computed from, so the two never drift.
+    // Reset is deliberately the small destructive one: a wipe-your-save
+    // action must never carry the same visual weight as Back.
+    const bottomRects = bottomButtonRects(width, height);
+    const backRect = bottomRects[0];
+    const resetRect = bottomRects[1];
+    this.drawButton(ctx, backRect.x, backRect.y, backRect.w, backRect.h, `${this.returnLabel} (Space)`, 'leave-town', {
+      variant: 'secondary',
       fontPx: 20,
     });
     this.drawButton(
       ctx,
-      width - margin - 260,
-      bottomY,
-      260,
-      48,
-      this.resetArmed ? '⚠️ Tap again to confirm reset' : '🗑 Reset save',
+      resetRect.x,
+      resetRect.y,
+      resetRect.w,
+      resetRect.h,
+      this.resetArmed ? '⚠️ Tap again to confirm' : '🗑 Reset save',
       'reset',
-      { fontPx: 18 },
+      { variant: 'destructive', fontPx: 16 },
     );
   }
 
@@ -590,12 +953,13 @@ export class TownHub {
       });
       this.drawButton(ctx, sellAllX, y - 20, sellAllW, 40, 'Sell all', `sell-all:${item.id}`, {
         fontPx: 18,
-        highlight: owned > 0,
+        variant: owned > 0 ? 'primary' : 'secondary',
       });
       y += 52;
     }
-    this.drawButton(ctx, margin, height - 64, 220, 48, '⬅ Back to town', 'shop-back', {
-      highlight: true,
+    const shopBackRect = bottomButtonRects(width, height)[2];
+    this.drawButton(ctx, shopBackRect.x, shopBackRect.y, shopBackRect.w, shopBackRect.h, '⬅ Back to town', 'shop-back', {
+      variant: 'secondary',
     });
   }
 }

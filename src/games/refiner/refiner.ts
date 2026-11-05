@@ -47,6 +47,7 @@
 import { RENDER, REFINER, STAGE, SWING } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
 import { assetUrl } from '../../core/assetUrl';
+import { paintButton } from '../../hub/townHub';
 import type { BodyState } from '../../core/bodyState';
 import { StarJumpDetector } from '../../core/starJump';
 import { inventory } from '../../core/inventory';
@@ -840,20 +841,11 @@ export class RefinerGame implements Game {
     // keep exactly one leave chip by replacing any previous one.
     this.cardRects = this.cardRects.filter((c) => c.action !== 'leave');
     this.cardRects.push({ x, y, w, h, action: 'leave' });
-    ctx.save();
-    // Solid fill, like the picker cards: a translucent control over
-    // the avatar is the same readability bug as a translucent chip.
-    ctx.fillStyle = '#232338';
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = 'rgba(232, 232, 240, 0.5)';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, w, h);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `20px ${RENDER.gameFont}`;
-    ctx.fillStyle = '#e8e8f0';
-    ctx.fillText('⬅ Leave to town', x + w / 2, y + h / 2);
-    ctx.restore();
+    // Same game-button look as the town hub (secondary style):
+    // opaque gradient, darker lip, rounded corners, drop shadow —
+    // not the old flat rectangle. (No hover/pressed state: the
+    // refiner has no pointermove path; it draws idle.)
+    paintButton(ctx, x, y, w, h, '⬅ Leave to town', 'secondary', 'idle', 20);
     void width;
   }
 

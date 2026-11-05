@@ -234,10 +234,37 @@ describe('fullscreen toggle wiring', () => {
   function dispatchCanvasPointerDown(x: number, y: number): void {
     const stage = elements.get('stage');
     if (stage === undefined) throw new Error('stage missing');
-    const event = { clientX: x, clientY: y, button: 0, buttons: 0 };
+    const event = { clientX: x, clientY: y, button: 0, buttons: 1 };
     for (const fn of stage.handlersFor('pointerdown')) {
       fn(event as never);
     }
+  }
+
+  function dispatchCanvasPointerUp(x: number, y: number): void {
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    const event = { clientX: x, clientY: y, button: 0, buttons: 0 };
+    for (const fn of stage.handlersFor('pointerup')) {
+      fn(event as never);
+    }
+  }
+
+  function dispatchCanvasPointerMove(x: number, y: number): void {
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    const event = { clientX: x, clientY: y, button: 0, buttons: 0 };
+    for (const fn of stage.handlersFor('pointermove')) {
+      fn(event as never);
+    }
+  }
+
+  /**
+   * A real tap: down arms the press, up over the same button
+   * activates it (v3.3). Down alone never activates.
+   */
+  function dispatchCanvasTap(x: number, y: number): void {
+    dispatchCanvasPointerDown(x, y);
+    dispatchCanvasPointerUp(x, y);
   }
 
   function hudText(): string {
@@ -285,7 +312,7 @@ describe('fullscreen toggle wiring', () => {
     // first activity button now, Refiner the second: right column,
     // x 492..936, y 218..270.
     driveFrames(2);
-    dispatchCanvasPointerDown(714, 244);
+    dispatchCanvasTap(714, 244);
 
     // The refiner starts on the next update; the HUD shows it.
     driveFrames(3);
@@ -293,7 +320,7 @@ describe('fullscreen toggle wiring', () => {
     expect(pauseLabel()).toBe('🏠 Town');
 
     // "Leave to town" chip: bottom-left, x 12..232, y 488..528.
-    dispatchCanvasPointerDown(122, 508);
+    dispatchCanvasTap(122, 508);
     driveFrames(2);
     // Swing Lab is restored and town is open again.
     expect(hudText()).toContain('Mining Lv');
@@ -349,10 +376,49 @@ describe('fullscreen toggle wiring', () => {
     expect(pauseLabel()).toBe('⛏ Back to the mine');
     driveFrames(2);
     // Mine is the first activity button: x 492..936, y 156..208.
-    dispatchCanvasPointerDown(714, 182);
+    dispatchCanvasTap(714, 182);
     expect(pauseLabel()).toBe('🏠 Town');
     driveFrames(2);
     expect(hudText()).toContain('Mining Lv');
+  });
+
+  it('hub buttons get hover + press states from pointer events (v3.3)', () => {
+    // State carried from the previous test: back in the mine, town
+    // closed. Space opens town again.
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    dispatchDocumentEvent('keydown', {
+      key: ' ',
+      repeat: false,
+      preventDefault: () => {},
+    });
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    driveFrames(2);
+
+    // Hover: moving over the Refiner button (x 492..936, y 218..270)
+    // brightens it — the next frame paints the hover top colour.
+    stage.fillStyles.length = 0;
+    dispatchCanvasPointerMove(714, 244);
+    driveFrames(1);
+    expect(stage.fillStyles).toContain('#ffe08a');
+    // Moving away clears the hover; the idle gold is back.
+    stage.fillStyles.length = 0;
+    dispatchCanvasPointerMove(10, 10);
+    driveFrames(1);
+    expect(stage.fillStyles).toContain('#ffcf5c');
+    expect(stage.fillStyles).not.toContain('#ffe08a');
+
+    // Down alone never activates: the press is only armed.
+    dispatchCanvasPointerDown(714, 244);
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    // Releasing off the button cancels the press.
+    dispatchCanvasPointerUp(10, 10);
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    // A real tap (down + up over the button) activates it.
+    dispatchCanvasTap(714, 244);
+    driveFrames(3);
+    expect(hudText()).toContain('Refining Lv');
+    expect(pauseLabel()).toBe('🏠 Town');
   });
 });
 });

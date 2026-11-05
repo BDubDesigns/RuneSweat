@@ -3,8 +3,12 @@ import { inventory, InventoryStore } from '../core/inventory';
 import type { StorageLike } from '../core/save';
 import {
   bixSellPrice,
+  bottomButtonRects,
+  BUTTON_STYLES,
+  rectsIntersect,
   sellAll,
   sellOne,
+  skylineLayout,
   TOWN_BACKGROUND,
   TownHub,
 } from './townHub';
@@ -39,26 +43,51 @@ function stubContext(): CanvasRenderingContext2D {
 
 /**
  * A recording stand-in: every method call is logged (name + args)
- * and every `fillStyle` set is recorded, so tests can prove the town
- * screen paints an opaque full-canvas background first.
+ * and every `fillStyle` / `strokeStyle` set is recorded, so tests can
+ * prove the town screen paints an opaque full-canvas background
+ * first. `createLinearGradient` returns a stub gradient that records
+ * its stops, and `shadowBlur` sets are recorded, so button-style
+ * tests can prove gradients / shadows instead of flat fills.
  */
 interface RecordedCall {
   method: string;
   args: unknown[];
 }
+interface RecordedGradient {
+  args: unknown[];
+  stops: { offset: number; color: string }[];
+}
 function recordingContext(): {
   ctx: CanvasRenderingContext2D;
   calls: RecordedCall[];
   fillStyles: string[];
+  strokeStyles: string[];
   texts: string[];
+  gradients: RecordedGradient[];
+  shadowBlurs: number[];
 } {
   const calls: RecordedCall[] = [];
   const fillStyles: string[] = [];
+  const strokeStyles: string[] = [];
   const texts: string[] = [];
+  const gradients: RecordedGradient[] = [];
+  const shadowBlurs: number[] = [];
   const target: Record<string, unknown> = {};
   const ctx = new Proxy(target, {
     get: (_t, prop) => {
       if (prop === 'canvas') return { width: 960, height: 540 };
+      if (prop === 'createLinearGradient') {
+        return (...args: unknown[]) => {
+          const entry: RecordedGradient = { args, stops: [] };
+          gradients.push(entry);
+          calls.push({ method: 'createLinearGradient', args });
+          return {
+            addColorStop: (offset: number, color: string) => {
+              entry.stops.push({ offset, color });
+            },
+          };
+        };
+      }
       return (...args: unknown[]) => {
         calls.push({ method: String(prop), args });
         if (prop === 'fillText' && typeof args[0] === 'string') {
@@ -70,11 +99,17 @@ function recordingContext(): {
       if (prop === 'fillStyle' && typeof value === 'string') {
         fillStyles.push(value);
       }
+      if (prop === 'strokeStyle' && typeof value === 'string') {
+        strokeStyles.push(value);
+      }
+      if (prop === 'shadowBlur' && typeof value === 'number') {
+        shadowBlurs.push(value);
+      }
       t[prop as string] = value;
       return true;
     },
   }) as unknown as CanvasRenderingContext2D;
-  return { ctx, calls, fillStyles, texts };
+  return { ctx, calls, fillStyles, strokeStyles, texts, gradients, shadowBlurs };
 }
 
 describe('Bix sell prices (active-game-only)', () => {
@@ -196,7 +231,7 @@ describe('TownHub', () => {
     inventory.addCredits(50);
     hub.open();
     hub.render(ctx, 1000);
-    // Reset button: bottom-right, x 676..936, y 476..524.
+    // Reset button: bottom-right, x 696..936, y 480..520.
     expect(hub.handlePointer(800, 500)).toBe(true);
     expect(hub.snapshot().resetArmed).toBe(true);
     expect(inventory.count('ferrite-shale')).toBe(9);
@@ -280,5 +315,136 @@ describe('TownHub', () => {
     hub.open();
     expect(hub.handleKey(' ')).toBe(true);
     expect(calls).toEqual(['leave-town', 'leave-town']);
+  });
+
+  it('primary buttons draw a gradient with rounded corners and a darker lip, not a flat fillRect (v3.3)', () => {
+    const { hub } = setup();
+    const rec = recordingContext();
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    // The Mine button is the first primary button: x 492..936, y 156..208.
+    const mineGradient = rec.gradients.find((g) => g.args[1] === 156);
+    expect(mineGradient).toBeDefined();
+    expect(mineGradient?.stops).toEqual([
+      { offset: 0, color: BUTTON_STYLES.primary.top },
+      { offset: 1, color: BUTTON_STYLES.primary.bottom },
+    ]);
+    // Rounded corners: the button path is built from arcs, and no
+    // fillRect ever paints the button's own rect (flat fill is gone).
+    expect(rec.calls.some((c) => c.method === 'arcTo')).toBe(true);
+    expect(
+      rec.calls.some(
+        (c) =>
+          c.method === 'fillRect' &&
+          c.args[0] === 492 &&
+          c.args[1] === 156 &&
+          c.args[2] === 444 &&
+          c.args[3] === 52,
+      ),
+    ).toBe(false);
+    // The darker bottom lip is painted, and the buttons are opaque
+    // (no translucent fill anywhere in the frame).
+    expect(rec.fillStyles).toContain(BUTTON_STYLES.primary.lip);
+    expect(rec.fillStyles.every((s) => !s.startsWith('rgba'))).toBe(true);
+    // The buttons cast a drop shadow.
+    expect(rec.shadowBlurs.some((b) => b > 0)).toBe(true);
+  });
+
+  it('Reset save uses the small destructive style, not the primary one (v3.3)', () => {
+    const { hub } = setup();
+    const rec = recordingContext();
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    expect(rec.fillStyles).toContain(BUTTON_STYLES.destructive.lip);
+    expect(rec.strokeStyles).toContain(BUTTON_STYLES.destructive.border);
+    expect(rec.fillStyles).toContain(BUTTON_STYLES.destructive.text);
+    // And it is smaller than the Back button next to it.
+    const [backRect, resetRect] = bottomButtonRects(960, 540);
+    expect(resetRect.w).toBeLessThan(backRect.w);
+    expect(resetRect.h).toBeLessThan(backRect.h);
+    // The destructive palette is distinct from the primary one.
+    expect(BUTTON_STYLES.destructive.top).not.toBe(BUTTON_STYLES.primary.top);
+    expect(BUTTON_STYLES.destructive.border).not.toBe(BUTTON_STYLES.primary.border);
+    expect(BUTTON_STYLES.destructive.text).not.toBe(BUTTON_STYLES.primary.text);
+  });
+
+  it('hover brightens a button, a press sinks it 2px with no shadow, and release activates it (v3.3)', () => {
+    const { hub, calls } = setup();
+    hub.open();
+    const rec = recordingContext();
+    hub.render(rec.ctx, 1000);
+    // Hover the Mine button (x 492..936, y 156..208).
+    expect(hub.handlePointerMove(600, 182)).toBe(true);
+    expect(hub.hoveredButton).toBe('mine');
+    expect(hub.handlePointerMove(100, 400)).toBe(false);
+    expect(hub.hoveredButton).toBe(null);
+    expect(hub.handlePointerMove(600, 182)).toBe(true);
+    rec.gradients.length = 0;
+    rec.shadowBlurs.length = 0;
+    hub.render(rec.ctx, 1000);
+    const hovered = rec.gradients.find((g) => g.args[1] === 156);
+    expect(hovered?.stops).toEqual([
+      { offset: 0, color: BUTTON_STYLES.primary.hoverTop },
+      { offset: 1, color: BUTTON_STYLES.primary.hoverBottom },
+    ]);
+    expect(rec.shadowBlurs).toContain(10);
+    // Press it: the button draws 2px lower (gradient starts at 158)
+    // with the shadow removed (a 0 blur is recorded for it).
+    expect(hub.handlePointerDown(600, 182)).toBe(true);
+    expect(hub.pressedButton).toBe('mine');
+    rec.gradients.length = 0;
+    rec.shadowBlurs.length = 0;
+    hub.render(rec.ctx, 1000);
+    const pressed = rec.gradients.find((g) => g.args[1] === 158);
+    expect(pressed).toBeDefined();
+    expect(pressed?.stops).toEqual([
+      { offset: 0, color: BUTTON_STYLES.primary.pressedTop },
+      { offset: 1, color: BUTTON_STYLES.primary.pressedBottom },
+    ]);
+    expect(rec.shadowBlurs).toContain(0);
+    // Release over the button activates it; release elsewhere cancels.
+    expect(hub.handlePointerUp(600, 182)).toBe(true);
+    expect(calls).toEqual(['mine']);
+    expect(hub.pressedButton).toBe(null);
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    expect(hub.handlePointerDown(600, 244)).toBe(true);
+    expect(hub.pressedButton).toBe('refiner');
+    expect(hub.handlePointerUp(100, 400)).toBe(false);
+    expect(calls).toEqual(['mine']);
+    expect(hub.pressedButton).toBe(null);
+  });
+
+  it('coming-soon lists Combat but not Lumberjack — no lumberjacking in v1 (v3.3)', () => {
+    const { hub } = setup();
+    const rec = recordingContext();
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    expect(rec.texts.some((t) => t.includes('Combat'))).toBe(true);
+    expect(rec.texts.some((t) => t.includes('coming soon'))).toBe(true);
+    expect(rec.texts.some((t) => t.includes('Lumberjack'))).toBe(false);
+  });
+
+  it('no skyline window overlaps any bottom button rect (v3.3)', () => {
+    for (const [width, height] of [
+      [960, 540],
+      [1280, 720],
+    ] as const) {
+      const buttons = bottomButtonRects(width, height);
+      const houses = skylineLayout(width, height);
+      expect(houses.length).toBeGreaterThan(0);
+      const windows = houses
+        .map((h) => h.window)
+        .filter((w): w is NonNullable<typeof w> => w !== null);
+      // The skyline still has lit windows — they are only dropped
+      // where they would poke out at a button's edge.
+      expect(windows.length).toBeGreaterThan(0);
+      expect(windows.length).toBeLessThan(houses.length);
+      for (const win of windows) {
+        for (const button of buttons) {
+          expect(rectsIntersect(win, button)).toBe(false);
+        }
+      }
+    }
   });
 });

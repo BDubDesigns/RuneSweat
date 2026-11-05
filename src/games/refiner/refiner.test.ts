@@ -13,6 +13,7 @@ import {
   pileZoneForStage,
 } from './refiner';
 import { GATE_BANNER, gateBannerRect } from '../../render/renderer';
+import { BUTTON_STYLES } from '../../hub/townHub';
 
 const PILE = pileZoneForStage(960, 540);
 const HOPPER = hopperZoneForStage(960, 540);
@@ -82,6 +83,55 @@ function stubContext(): CanvasRenderingContext2D {
       return true;
     },
   }) as unknown as CanvasRenderingContext2D;
+}
+
+/**
+ * Recording stand-in for the Leave-chip style test: logs method
+ * calls and string `fillStyle` sets, and `createLinearGradient`
+ * returns a stub gradient that records its stops.
+ */
+interface RecordedGradient {
+  args: unknown[];
+  stops: { offset: number; color: string }[];
+}
+function recordingContext(): {
+  ctx: CanvasRenderingContext2D;
+  calls: { method: string; args: unknown[] }[];
+  fillStyles: string[];
+  gradients: RecordedGradient[];
+} {
+  const calls: { method: string; args: unknown[] }[] = [];
+  const fillStyles: string[] = [];
+  const gradients: RecordedGradient[] = [];
+  const target: Record<string, unknown> = {};
+  const ctx = new Proxy(target, {
+    get: (_t, prop) => {
+      if (prop === 'canvas') return { width: 960, height: 540 };
+      if (prop === 'createLinearGradient') {
+        return (...args: unknown[]) => {
+          const entry: RecordedGradient = { args, stops: [] };
+          gradients.push(entry);
+          calls.push({ method: 'createLinearGradient', args });
+          return {
+            addColorStop: (offset: number, color: string) => {
+              entry.stops.push({ offset, color });
+            },
+          };
+        };
+      }
+      return (...args: unknown[]) => {
+        calls.push({ method: String(prop), args });
+      };
+    },
+    set: (t, prop, value) => {
+      if (prop === 'fillStyle' && typeof value === 'string') {
+        fillStyles.push(value);
+      }
+      t[prop as string] = value;
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+  return { ctx, calls, fillStyles, gradients };
 }
 
 describe('RefinerGame', () => {
@@ -181,6 +231,32 @@ describe('RefinerGame', () => {
     game.selectRecipe('refined-ferrite');
     expect(() => game.render(ctx, 1000, REST, null)).not.toThrow();
     expect(() => game.render(ctx, 1000, OVER_PILE, null)).not.toThrow();
+  });
+
+  it('the Leave chip uses the shared game-button look: gradient, rounded corners, no flat fillRect (v3.3)', () => {
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    const rec = recordingContext();
+    game.render(rec.ctx, 1000, null, null);
+    // Leave chip: bottom-left, x 12..232, y 488..528.
+    const chipGradient = rec.gradients.find((g) => g.args[1] === 488);
+    expect(chipGradient).toBeDefined();
+    expect(chipGradient?.stops).toEqual([
+      { offset: 0, color: BUTTON_STYLES.secondary.top },
+      { offset: 1, color: BUTTON_STYLES.secondary.bottom },
+    ]);
+    expect(rec.calls.some((c) => c.method === 'arcTo')).toBe(true);
+    expect(
+      rec.calls.some(
+        (c) =>
+          c.method === 'fillRect' &&
+          c.args[0] === 12 &&
+          c.args[1] === 488 &&
+          c.args[2] === 220 &&
+          c.args[3] === 40,
+      ),
+    ).toBe(false);
+    expect(rec.fillStyles).toContain(BUTTON_STYLES.secondary.lip);
   });
 });
 

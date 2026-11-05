@@ -148,6 +148,14 @@ export interface BodyState {
   jumping: boolean;
   /** Hip-mid dropped + knees bent: a duck / squat. */
   ducking: boolean;
+  /**
+   * Ankle-to-ankle distance as a fraction of torso length (raw, not
+   * smoothed — ankles are stable when standing and the spread in a
+   * jumping jack is large, so no filter lag is wanted). Standing reads
+   * ~0.59 (hip width); a jumping jack lands ~1.0-1.4. Feeds the
+   * star-jump detector (`core/starJump.ts`) only. 0 when no body.
+   */
+  ankleSpreadTorsoFrac?: number;
   /** The standing hip-mid y this frame's jump/duck is measured against. */
   hipBaselineY: number;
   /** Frame timestamp this state was derived from, in ms. */
@@ -582,6 +590,7 @@ export class BodyStateTracker {
         torsoY: 0.5,
         torsoLength: 0,
         shoulderWidthTorsoFrac: 0,
+        ankleSpreadTorsoFrac: 0,
         noseOffsetTorsoFrac: null,
         wristLatchSwapped: false,
         visibilityScore: 0,
@@ -629,6 +638,7 @@ export class BodyStateTracker {
         torsoY: 0.5,
         torsoLength: 0,
         shoulderWidthTorsoFrac: 0,
+        ankleSpreadTorsoFrac: 0,
         noseOffsetTorsoFrac: null,
         wristLatchSwapped: false,
         visibilityScore: 0,
@@ -647,6 +657,7 @@ export class BodyStateTracker {
       landmarkDistance(shoulderMid, hipMid),
       1e-6,
     );
+    const ankleSpreadTorsoFrac = landmarkDistance(la, ra) / torsoLength;
     // Nose offset from the shoulder midpoint (facing second signal):
     // null when the nose is not confidently visible, so callers fall
     // back to the shoulder-width ratio alone.
@@ -772,6 +783,7 @@ export class BodyStateTracker {
       torsoY: torso.y,
       torsoLength,
       shoulderWidthTorsoFrac,
+      ankleSpreadTorsoFrac,
       noseOffsetTorsoFrac,
       wristLatchSwapped: latched.swapped,
       visibilityScore,

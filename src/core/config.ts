@@ -469,6 +469,86 @@ export const SWING = {
   weakTickDurationSec: 0.08,
 } as const;
 
+/** Star-jump detector tuning (`core/starJump.ts`). A star jump is a
+ * jumping-jack shape: jumping + arms out wide + legs apart. Forgiving
+ * on purpose — Brandon is not a gymnast; the detector judges the
+ * shape, not perfection. */
+export const STAR_JUMP = {
+  /**
+   * Wrist-to-wrist spread, in torso lengths, for "arms out wide".
+   * Shoulder width is ~0.73 torso, so arms straight up read ~0.73;
+   * arms angled out ±35° (the sim's Q/E) read ~1.9. 1.2 sits between:
+   * clearly wider than overhead, well below a full T-pose (~2.2).
+   */
+  minWristSpreadTorsoFrac: 1.2,
+  /**
+   * Both wrists must be at least this far ABOVE the shoulder (torso
+   * lengths) — the arms are up/out, not hanging wide at the sides.
+   * 0.1 is barely above the shoulder line: a jack's arms are high,
+   * but a tired player's arms still count.
+   */
+  minWristHeightTorsoFrac: 0.1,
+  /**
+   * Ankle-to-ankle spread, in torso lengths, for "legs apart".
+   * Standing hip width reads ~0.59; a jumping jack's feet land
+   * ~1.0-1.4 apart. 0.85 splits the gap with margin both ways.
+   */
+  minAnkleSpreadTorsoFrac: 0.85,
+  /**
+   * Minimum ms between counted star jumps. A single jack crosses the
+   * shape for several frames at ~9 Hz inference; the re-arm (land
+   * first) does most of the work, this is the backstop.
+   */
+  minIntervalMs: 500,
+} as const;
+
+/** Refiner tuning (`games/refiner/`). */
+export const REFINER = {
+  /** Ore shown in the pile at once; the pile refills from owned stock. */
+  pileVisibleMax: 10,
+  /** Ore a recipe needs in the hopper before star jumps start. */
+  hopperCapacity: 2,
+  /** Star jumps that complete one batch. */
+  starJumpsPerBatch: 3,
+  /**
+   * Both hands must stay over the pile this long (ms) before one ore
+   * sticks — a pass-through wave must not grab by accident.
+   */
+  grabDwellMs: 200,
+  /** XP per Refining level (level = floor(xp / xpPerLevel) + 1). */
+  xpPerLevel: 100,
+} as const;
+
+/**
+ * Bix's shop — sell prices in Credits.
+ *
+ * ACTIVE-GAME-ONLY, NOT RuneSpace canon. RuneSpace's Bix sells Power
+ * Cells at 12cr, buys them back at 4cr, and buys gems (Uncut Quartz 8,
+ * Topaz 18, Sapphire 35) — those figures live in RuneSpace shop /
+ * dialogue content, not `balance.ts`, and were NOT re-verified against
+ * the repo for this slice. The prices below are new values defined
+ * here for the active game: ore sells cheap, refined material sells
+ * for roughly 3x its ore (2 ore in, 1 refined out, so refining roughly
+ * doubles the value of the ore: 2x2cr in -> 6cr out).
+ */
+export const BIX = {
+  /** Credits per unit sold. */
+  sellPrices: {
+    'ferrite-shale': 2,
+    'galvanite': 4,
+    'refined-ferrite': 6,
+    'galvanic-stock': 10,
+  },
+} as const;
+
+/** Local save (`core/save.ts`). Single-player, localStorage only. */
+export const SAVE = {
+  /** Versioned key: bump the version (and the key) on a breaking change. */
+  key: 'activersespace-save-v1',
+  /** Save format version stored inside the payload. */
+  version: 1,
+} as const;
+
 /** Web Audio synth SFX. All sounds are synthesized — no audio files. */
 export const AUDIO = {
   enabled: true,

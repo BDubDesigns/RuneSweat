@@ -1,17 +1,24 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { SoundEffects } from '../../core/audio';
-import { SIM } from '../../core/config';
+import { PRESS, SIM } from '../../core/config';
 import type { BodyState } from '../../core/bodyState';
 import { BodyStateTracker } from '../../core/bodyState';
+import { pressButtonZones } from '../../core/pressDetector';
 import { inventory } from '../../core/inventory';
 import { MouseSource } from '../../sim/mouseSource';
 import {
   PEDESTAL_STYLE,
   PICKER_CARD,
   RefinerGame,
+  hopperLabelRect,
   hopperZoneForStage,
+  leaveChipRect,
+  pedestalRectsForStage,
   pickerCardLayout,
+  pileLabelRect,
   pileZoneForStage,
+  rectsIntersect,
+  simTorsoBox,
 } from './refiner';
 import { GATE_BANNER, gateBannerRect } from '../../render/renderer';
 import { BUTTON_STYLES } from '../../hub/townHub';
@@ -55,15 +62,51 @@ function makeBody(options: {
 /**
  * Press body for the game: both wrists inside the detector's button
  * zones, moving downward into the pressed position, then holding.
- * Zones (`core/pressDetector`) for hip-mid (0.5, 0.55), torso 0.3:
- * left x 0.185..0.335, right x 0.665..0.815, y 0.505..0.625.
- * `elapsedMs` is ms since this press started: the wrists travel
- * from the zone top (0.505) down to the pressed depth (0.586, hip
- * line + 0.12 torso) over ~270 ms, then hold still. The detector
- * needs downward motion at some point in the hold + a 300 ms hold,
- * so each press is held ~900 ms in the tests.
+ * Geometry comes from `pressButtonZones` (hip-mid (0.5, 0.55),
+ * torso 0.3) — never hard-coded — so it follows the zones whatever
+ * size Worker A lands: v3.4 zones were left x 0.185..0.335, right x
+ * 0.665..0.815, y 0.505..0.625; v3.5 shrinks them toward hip-mid
+ * ±0.5 torso. `elapsedMs` is ms since this press started: the
+ * wrists travel from the zone top down to the pressed depth (hip
+ * line + `PRESS.pressDepthTorsoFrac`, clamped inside the zone) over
+ * the first frames, then hold still. The detector needs downward
+ * motion at some point in the hold + a 300 ms hold, so each press
+ * is held ~900 ms in the tests.
  */
 function pressBody(elapsedMs: number): BodyState {
+  const zones = pressButtonZones(0.5, 0.55, 0.3);
+  const pressedY = Math.min(
+    zones.left.y + zones.left.h - 0.001,
+    0.55 + PRESS.pressDepthTorsoFrac * 0.3,
+  );
+  const frames = Math.floor(elapsedMs / 16);
+  const y = Math.min(pressedY, zones.left.y + 0.005 * frames);
+  return {
+    present: true,
+    torsoLength: 0.3,
+    torsoX: 0.5,
+    torsoY: 0.55,
+    shoulderY: 0.25,
+    leftWristX: zones.left.x + zones.left.w / 2,
+    rightWristX: zones.right.x + zones.right.w / 2,
+    leftWristY: y,
+    rightWristY: y,
+    jumping: false,
+    ankleSpreadTorsoFrac: 0.59,
+  } as unknown as BodyState;
+}
+
+/**
+ * Press body at the OLD v3.4 far-out positions: wrists at hip-mid
+ * ±0.8 torso, travelling from the old zone top (hip − 0.15 torso)
+ * down to the old pressed depth (hip + 0.12 torso). Once the v3.5
+ * zones shrink, these wrists sit outside the buttons and must not
+ * count — that is the regression this pins. While the config still
+ * carries the v3.4 numbers the old positions ARE the zones, so the
+ * same body counts one press; the test below reads the live zones
+ * to decide which outcome to expect.
+ */
+function oldPressBody(elapsedMs: number): BodyState {
   const frames = Math.floor(elapsedMs / 16);
   const y = Math.min(0.586, 0.505 + 0.005 * frames);
   return {
@@ -524,14 +567,48 @@ describe('RefinerGame pedestals + forging bar (v3.4)', () => {
     expect(
       rec.fills.filter((f) => f.style === PEDESTAL_STYLE.button),
     ).toHaveLength(2);
-    // Buttons sit at the detector's zones (hip-mid ±0.8 torso,
-    // top at hip − 0.15 torso): zone top canvas y = 0.505 * 540.
-    for (const button of rec.fills.filter(
-      (f) => f.style === PEDESTAL_STYLE.button,
-    )) {
-      expect(button.y).toBeCloseTo(272.7, 0);
-      expect(button.w).toBeCloseTo(144, 0);
-      expect(button.h).toBeCloseTo(64.8, 0);
+    // Buttons sit at the detector's zones — computed from
+    // `pressButtonZones` here, never hard-coded, so the expectation
+    // follows the zones whatever size Worker A lands. Canvas x is
+    // mirrored (video-left zone = canvas-right button).
+    const zones = pressButtonZones(0.5, 0.55, 0.3);
+    const zoneToCanvas = (z: { x: number; y: number; w: number; h: number }) => {
+      const x1 = (1 - z.x) * 960;
+      const x2 = (1 - (z.x + z.w)) * 960;
+      return {
+        x: Math.min(x1, x2),
+        y: z.y * 540,
+        w: Math.abs(x2 - x1),
+        h: z.h * 540,
+      };
+    };
+    const expectedButtons = [zones.left, zones.right]
+      .map(zoneToCanvas)
+      .sort((a, b) => a.x - b.x);
+    const buttons = rec.fills
+      .filter((f) => f.style === PEDESTAL_STYLE.button)
+      .sort((a, b) => a.x - b.x);
+    expect(buttons).toHaveLength(2);
+    for (let i = 0; i < 2; i += 1) {
+      expect(buttons[i]?.x).toBeCloseTo(expectedButtons[i]?.x ?? 0, 0);
+      expect(buttons[i]?.y).toBeCloseTo(expectedButtons[i]?.y ?? 0, 0);
+      expect(buttons[i]?.w).toBeCloseTo(expectedButtons[i]?.w ?? 0, 0);
+      expect(buttons[i]?.h).toBeCloseTo(expectedButtons[i]?.h ?? 0, 0);
+    }
+    // Posts are narrower than their pads and centred under them.
+    const posts = rec.fills
+      .filter((f) => f.style === PEDESTAL_STYLE.column)
+      .sort((a, b) => a.x - b.x);
+    expect(posts).toHaveLength(2);
+    for (let i = 0; i < 2; i += 1) {
+      const button = buttons[i];
+      const post = posts[i];
+      if (button === undefined || post === undefined) continue;
+      expect(post.w).toBeLessThan(button.w);
+      expect(post.x).toBeGreaterThan(button.x);
+      expect(post.x + post.w).toBeLessThan(button.x + button.w);
+      expect(post.y).toBeCloseTo(button.y + button.h, 0);
+      expect(post.y + post.h).toBeCloseTo(540, 0);
     }
   });
 
@@ -570,21 +647,30 @@ describe('RefinerGame pedestals + forging bar (v3.4)', () => {
         .filter((f) => f.style === PEDESTAL_STYLE.button)
         .map((f) => f.y);
     };
-    // At rest the buttons sit at their zones (y 272.7).
+    // At rest the buttons sit at their zones.
+    const zones = pressButtonZones(0.5, 0.55, 0.3);
+    const restY = zones.left.y * 540;
+    const buttonH = zones.left.h * 540;
+    // Full sink: PRESS.pressDepthTorsoFrac, capped at half the pad
+    // height so the small v3.5 pad never vanishes into its post.
+    const sinkPx = Math.min(
+      PRESS.pressDepthTorsoFrac * 0.3 * 540,
+      buttonH * 0.5,
+    );
     const atRest = buttonYs(ctx.t, REST);
     expect(atRest).toHaveLength(2);
-    for (const y of atRest) expect(y).toBeCloseTo(272.7, 0);
-    // Mid-hold the buttons are sunk by the full press depth
-    // (0.12 torso * 540 = 19.44 px) once the hold completes.
+    for (const y of atRest) expect(y).toBeCloseTo(restY, 0);
+    // Mid-hold the buttons are sunk by the full press depth once
+    // the hold completes.
     ctx.stepFnTo(ctx.t + 600, pressBody, ctx.t);
     const midHold = buttonYs(ctx.t, pressBody(600));
     expect(midHold).toHaveLength(2);
-    for (const y of midHold) expect(y).toBeCloseTo(292.1, 0);
+    for (const y of midHold) expect(y).toBeCloseTo(restY + sinkPx, 0);
     // Hands off again: the buttons rise back to their zones.
     ctx.stepTo(ctx.t + 600, REST);
     const risen = buttonYs(ctx.t, REST);
     expect(risen).toHaveLength(2);
-    for (const y of risen) expect(y).toBeCloseTo(272.7, 0);
+    for (const y of risen) expect(y).toBeCloseTo(restY, 0);
   });
 });
 
@@ -686,12 +772,12 @@ describe('RefinerGame via mouse sim', () => {
       else expect(ctx.game.snapshot().batchesDone).toBe(1);
       ctx.mouse.setPressing(false);
       // Hands back to the centre (A+D clasp) between presses, so the
-      // detector re-arms: the sim's hanging wrists rest just inside
-      // the button zones (0.330 vs the 0.335 edge), so merely letting
-      // go of P would leave it disarmed. A real player's hanging
-      // hands sit well inside the zones' inner edge (~0.4 vs 0.55
-      // torso), so real play re-arms by lowering the hands — this
-      // extra step is a sim artifact, not a game rule.
+      // detector re-arms: releasing P returns the wrists to their
+      // hanging rest, which sits at (or just inside) the small v3.5
+      // button zones, so merely letting go of P may leave the
+      // detector disarmed. A real player's hands re-arm by lifting
+      // off the buttons between presses — the clasp step is the
+      // sim's version of that lift, not a game rule.
       ctx.mouse.setKeyArm('left', true);
       ctx.mouse.setKeyArm('right', true);
       step(ctx, t, t + 300);
@@ -1049,5 +1135,240 @@ describe('RefinerGame zones pulled inward (v3.2)', () => {
     expect((pile.y + pile.h) / H).toBeCloseTo(0.74, 2);
     expect(0.57).toBeGreaterThanOrEqual(pile.y / H);
     expect(0.57).toBeLessThanOrEqual((pile.y + pile.h) / H);
+  });
+});
+
+/**
+ * Pedestal press, v3.5 (Nov 4 playtest): the v3.4 pedestals were
+ * two GIANT gold slabs at the far bottom corners (~1/4 stage width
+ * each) that covered the "Hopper: 2/2" label and the top edge of
+ * the "Leave to town" chip, with no distinct button — the whole
+ * slab WAS the button. v3.5 makes each pedestal a slim post with a
+ * small pad that IS the detection zone, at resting-hand height
+ * beside the body, and moves the pile/hopper labels above their
+ * zones so the full-height posts never cross a label.
+ */
+describe('RefinerGame pedestals v3.5 (slim posts, small pads)', () => {
+  const W = 960;
+  const H = 540;
+
+  /** Canvas rect of a video-space zone (mirrored x, like toCanvas). */
+  function zoneToCanvas(z: { x: number; y: number; w: number; h: number }): {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  } {
+    const x1 = (1 - z.x) * W;
+    const x2 = (1 - (z.x + z.w)) * W;
+    return {
+      x: Math.min(x1, x2),
+      y: z.y * H,
+      w: Math.abs(x2 - x1),
+      h: z.h * H,
+    };
+  }
+
+  it('the rendered pads equal the detection zones (same helper, one source)', () => {
+    // Pure helper: pad rect == mirrored pressButtonZones rect.
+    for (const hip of [
+      { x: 0.5, y: 0.55 },
+      { x: 0.45, y: 0.55 },
+    ]) {
+      const zones = pressButtonZones(hip.x, hip.y, 0.3);
+      const rects = pedestalRectsForStage(W, H, hip.x, hip.y, 0.3);
+      for (const [zone, pad] of [
+        [zones.left, rects.left.button],
+        [zones.right, rects.right.button],
+      ] as const) {
+        const expected = zoneToCanvas(zone);
+        expect(pad.x).toBeCloseTo(expected.x, 0);
+        expect(pad.y).toBeCloseTo(expected.y, 0);
+        expect(pad.w).toBeCloseTo(expected.w, 0);
+        expect(pad.h).toBeCloseTo(expected.h, 0);
+      }
+      // Posts are narrower than their pads, centred under them.
+      for (const side of [rects.left, rects.right]) {
+        expect(side.post.w).toBeLessThan(side.button.w);
+        expect(side.post.x).toBeGreaterThan(side.button.x);
+        expect(side.post.x + side.post.w).toBeLessThan(
+          side.button.x + side.button.w,
+        );
+      }
+    }
+    // Rendered fills: the gold pad fills in a recording context are
+    // exactly the zone rects too — the draw path uses the helper.
+    inventory.reset();
+    inventory.add('ferrite-shale', 20);
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    expect(game.selectRecipe('refined-ferrite')).toBe(true);
+    let t = 0;
+    const stepTo = (toMs: number, body: BodyState): void => {
+      for (; t < toMs; t += 16) game.update(16, t, body, null);
+    };
+    stepTo(300, OVER_PILE);
+    stepTo(400, OVER_HOPPER);
+    stepTo(700, OVER_PILE);
+    stepTo(800, OVER_HOPPER);
+    stepTo(1300, REST);
+    expect(game.snapshot().pedestalSlideT).toBe(1);
+    const fills: { x: number; y: number; w: number; h: number; style: string }[] = [];
+    let fillStyle = '';
+    const target: Record<string, unknown> = {};
+    const ctx = new Proxy(target, {
+      get: (_t, prop) => {
+        if (prop === 'canvas') return { width: W, height: H };
+        if (prop === 'fillRect') {
+          return (x: number, y: number, w: number, h: number) => {
+            fills.push({ x, y, w, h, style: fillStyle });
+          };
+        }
+        if (prop === 'createLinearGradient') {
+          return () => ({ addColorStop: () => {} });
+        }
+        if (prop === 'measureText') return () => ({ width: 0 });
+        return () => undefined;
+      },
+      set: (tt, prop, value) => {
+        if (prop === 'fillStyle') fillStyle = String(value);
+        tt[prop as string] = value;
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    game.render(ctx, 1300, REST, null);
+    const zones = pressButtonZones(0.5, 0.55, 0.3);
+    const expected = [zones.left, zones.right]
+      .map(zoneToCanvas)
+      .sort((a, b) => a.x - b.x);
+    const pads = fills
+      .filter((f) => f.style === PEDESTAL_STYLE.button)
+      .sort((a, b) => a.x - b.x);
+    expect(pads).toHaveLength(2);
+    for (let i = 0; i < 2; i += 1) {
+      expect(pads[i]?.x).toBeCloseTo(expected[i]?.x ?? 0, 0);
+      expect(pads[i]?.y).toBeCloseTo(expected[i]?.y ?? 0, 0);
+      expect(pads[i]?.w).toBeCloseTo(expected[i]?.w ?? 0, 0);
+      expect(pads[i]?.h).toBeCloseTo(expected[i]?.h ?? 0, 0);
+    }
+  });
+
+  it('no pedestal rect intersects the pile label, hopper label, Leave chip, or torso box', () => {
+    // Worst-case labels: a full pile ("10 shown") with a two-digit
+    // owned count is the widest the pile label gets.
+    const pileLabel = pileLabelRect(W, H, 10, 99);
+    const hopperLabel = hopperLabelRect(W, H, 2, 2);
+    const leave = leaveChipRect(W, H);
+    const torso = simTorsoBox(W, H);
+    for (const slideT of [1, 0.5]) {
+      const rects = pedestalRectsForStage(W, H, 0.5, 0.55, 0.3, slideT);
+      for (const side of [rects.left, rects.right]) {
+        for (const part of [side.button, side.post]) {
+          expect(rectsIntersect(part, pileLabel)).toBe(false);
+          expect(rectsIntersect(part, hopperLabel)).toBe(false);
+          expect(rectsIntersect(part, leave)).toBe(false);
+          expect(rectsIntersect(part, torso)).toBe(false);
+        }
+      }
+    }
+    // The labels sit above their zones, clear of the pedestals'
+    // whole vertical run; the Leave chip is far left of both posts.
+    expect(pileLabel.y + pileLabel.h).toBeLessThanOrEqual(240);
+    expect(hopperLabel.y + hopperLabel.h).toBeLessThanOrEqual(240);
+    expect(leave.x + leave.w).toBeLessThan(300);
+  });
+
+  it('the pile/hopper labels sit above their zones (v3.5), not below them', () => {
+    const pile = pileZoneForStage(W, H);
+    const hopper = hopperZoneForStage(W, H);
+    const pileLabel = pileLabelRect(W, H, 10, 20);
+    const hopperLabel = hopperLabelRect(W, H, 2, 2);
+    expect(pileLabel.y + pileLabel.h).toBeLessThanOrEqual(pile.y);
+    expect(hopperLabel.y + hopperLabel.h).toBeLessThanOrEqual(hopper.y);
+    expect(pileLabel.x + pileLabel.w / 2).toBeCloseTo(pile.x + pile.w / 2, 0);
+    expect(hopperLabel.x + hopperLabel.w / 2).toBeCloseTo(
+      hopper.x + hopper.w / 2,
+      0,
+    );
+  });
+
+  it('a press does not count when the wrists are at the OLD v3.4 far-out positions', () => {
+    inventory.reset();
+    inventory.add('ferrite-shale', 20);
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    expect(game.selectRecipe('refined-ferrite')).toBe(true);
+    let t = 0;
+    const stepTo = (toMs: number, body: BodyState): void => {
+      for (; t < toMs; t += 16) game.update(16, t, body, null);
+    };
+    const stepFnTo = (
+      toMs: number,
+      bodyFn: (elapsedMs: number) => BodyState,
+      startMs: number,
+    ): void => {
+      for (; t < toMs; t += 16) game.update(16, t, bodyFn(t - startMs), null);
+    };
+    stepTo(300, OVER_PILE);
+    stepTo(400, OVER_HOPPER);
+    stepTo(700, OVER_PILE);
+    stepTo(800, OVER_HOPPER);
+    expect(game.snapshot().phase).toBe('pressing');
+    stepTo(1300, REST);
+    // Are the old far-out wrists inside the LIVE zones? If Worker
+    // A's shrink has not landed yet, they are — the old positions
+    // ARE the zones, so the same hold counts one press. Once the
+    // zones shrink, the old wrists sit outside them and nothing
+    // counts. The expectation follows the live zones either way.
+    const zones = pressButtonZones(0.5, 0.55, 0.3);
+    const oldInside =
+      0.26 >= zones.left.x &&
+      0.26 <= zones.left.x + zones.left.w &&
+      0.586 >= zones.left.y &&
+      0.586 <= zones.left.y + zones.left.h;
+    stepFnTo(3300, oldPressBody, 1300);
+    expect(game.snapshot().pressesDone).toBe(oldInside ? 1 : 0);
+    expect(game.snapshot().batchesDone).toBe(0);
+  });
+
+  it('sim P key puts the wrists on the live button centres (tripwire for the mouseSource retarget)', () => {
+    // The P-key animation lives in sim/mouseSource.ts (not the
+    // refiner): it must animate the wrists to pressButtonZones,
+    // not to hard-coded v3.4 numbers. This test reads the live
+    // zones and checks the sim lands on them — it goes red if the
+    // zones move and the sim animation is not retargeted with them.
+    inventory.reset();
+    const mouse = new MouseSource();
+    const tracker = new BodyStateTracker();
+    mouse.start(0);
+    mouse.setPointer({ x: 0.5, y: SIM.standingHipY }, false);
+    mouse.setPressing(true);
+    let body: BodyState | null = null;
+    for (let t = 16; t <= 600; t += 16) {
+      const frame = mouse.frameAt(t);
+      if (frame !== null) body = tracker.update(frame);
+    }
+    expect(body).not.toBeNull();
+    if (body === null) throw new Error('no sim body');
+    const zones = pressButtonZones(
+      body.torsoX,
+      body.torsoY,
+      body.torsoLength,
+    );
+    expect(body.leftWristX).toBeCloseTo(
+      zones.left.x + zones.left.w / 2,
+      1,
+    );
+    expect(body.rightWristX).toBeCloseTo(
+      zones.right.x + zones.right.w / 2,
+      1,
+    );
+    // Pressed depth: hip line + press depth, clamped inside the zone.
+    const pressedY = Math.min(
+      zones.left.y + zones.left.h,
+      body.torsoY + PRESS.pressDepthTorsoFrac * body.torsoLength,
+    );
+    expect(body.leftWristY).toBeCloseTo(pressedY, 1);
+    expect(body.rightWristY).toBeCloseTo(pressedY, 1);
   });
 });

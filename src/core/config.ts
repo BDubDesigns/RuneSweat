@@ -453,9 +453,24 @@ export const SWING = {
  * + held for `holdMs`. Replaces the star jump (v3.1-3.3): Brandon is
  * too tall for his room to jump without his head/hands leaving the
  * frame, so the jump never counted — the press needs arms only, no
- * vertical space, no legs. Forgiving on purpose: the zones are wide
- * (0.5 torso) and the hold is short (300 ms); the detector judges
- * the press, not perfection. */
+ * vertical space, no legs. Forgiving on purpose: the hold is short
+ * (300 ms); the detector judges the press, not perfection.
+ *
+ * v3.5 geometry (Nov 4 playtest): Brandon's v3.4 verdict was that the
+ * pedestals were giant gold slabs at the far bottom corners, too far
+ * from his body to reach, with no distinct button. The zones moved
+ * in to where the hands already hang and shrank to fist size:
+ * centres at hip-mid ±0.55 torso (was ±0.8), 0.25 wide × 0.2 tall
+ * (was 0.5 × 0.4), top just below the hip line (was 0.15 above it).
+ * The numbers are anchored to a measurement, not a guess: the sim
+ * body's hanging wrists (`sim/mouseSource.ts`, arms at ±π·0.94 from
+ * straight up) rest at hip-mid ±0.567 torso horizontally and hip +
+ * 0.048 torso vertically, so a ±0.55 centre puts the resting wrist
+ * ~0.017 torso off the zone centre, and a top at hip + 0.02 torso
+ * puts it ~0.028 torso below the zone top — the press is a short
+ * downward push from rest, not a reach. The 0.2 height holds the
+ * ~0.1-torso press travel plus slack: resting wrist + 0.1 torso
+ * still sits ~0.072 torso above the zone bottom. */
 export const PRESS = {
   /**
    * Both wrists must stay inside their button zones this long (ms)
@@ -471,21 +486,37 @@ export const PRESS = {
   minIntervalMs: 500,
   /**
    * Button-zone centres sit this far (torso lengths) left/right of
-   * the hip-mid. 0.8 puts the buttons just outside shoulder width
-   * (~0.73 torso) — reachable with the arms angled out, without a
-   * full T-pose (~2.2 torso wrist-to-wrist).
+   * the hip-mid. 0.55 centres the zones on the hanging hands: the
+   * sim body's resting wrists sit at hip-mid ±0.567 torso, so the
+   * resting wrist lands ~0.017 torso off the zone centre and the
+   * press is a short downward push from rest. Was 0.8 (v3.4), which
+   * put the buttons just outside shoulder width and made the press
+   * a reach — Brandon's v3.4 playtest verdict.
    */
-  buttonOffsetTorsoFrac: 0.8,
-  /** Button-zone width, in torso lengths. */
-  buttonZoneWTorsoFrac: 0.5,
-  /** Button-zone height, in torso lengths. */
-  buttonZoneHTorsoFrac: 0.4,
+  buttonOffsetTorsoFrac: 0.55,
+  /**
+   * Button-zone width, in torso lengths. 0.25 is fist/palm-sized:
+   * a fist (~0.18-0.2 torso wide) covers the button, with ~0.025
+   * torso of slack per side for wrist-landmark jitter. Was 0.5
+   * (v3.4) — a slab, not a button.
+   */
+  buttonZoneWTorsoFrac: 0.25,
+  /**
+   * Button-zone height, in torso lengths. 0.2 fits the ~0.1-torso
+   * downward press travel plus slack for the hold: the resting
+   * wrist sits ~0.028 torso below the zone top, and after the full
+   * 0.1-torso push it still sits ~0.072 torso above the bottom.
+   * Was 0.4 (v3.4).
+   */
+  buttonZoneHTorsoFrac: 0.2,
   /**
    * Button-zone top, relative to the hip line, in torso lengths.
-   * -0.15 puts the top just above the hips: the buttons sit at
-   * waist height, where the hands naturally fall.
+   * +0.02 puts the top just below the hips: the buttons sit at
+   * resting hand height, where the hands naturally hang (the sim
+   * body's resting wrists are at hip + 0.048 torso), not at waist
+   * height above the hips. Was -0.15 (v3.4).
    */
-  buttonZoneTopOffsetTorsoFrac: -0.15,
+  buttonZoneTopOffsetTorsoFrac: 0.02,
   /**
    * Pedestals slide in from off-screen over this long (ms) once the
    * hopper fills — render only; the detector does not read it.

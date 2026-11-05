@@ -13,11 +13,17 @@
  *
  * The buttons live in **normalized video space** (the same space as
  * `BodyState` wrist X/Y, 0..1), placed relative to the body's stance
- * so they follow the player: centre at hip-mid ± 0.8 torso lengths
- * horizontally, top at the hip line − 0.15 torso, 0.5 wide × 0.4
- * tall (torso lengths). See `PRESS` in `core/config.ts` for the
- * numbers and why. `pressButtonZones` is pure so the game renders
- * the same zones it detects against.
+ * so they follow the player: centre at hip-mid ± 0.55 torso lengths
+ * horizontally, top at the hip line + 0.02 torso, 0.25 wide × 0.2
+ * tall (torso lengths). v3.5 moved them in from ±0.8 and shrank
+ * them from 0.5 × 0.4 (v3.4): Brandon's playtest verdict was giant
+ * slabs at the far bottom corners, too far to reach, no distinct
+ * button. The new zones sit where the hands already hang — the
+ * sim body's resting wrists are at hip-mid ±0.567 torso and hip +
+ * 0.048 torso — so the press is a short downward push from rest.
+ * See `PRESS` in `core/config.ts` for the numbers and why.
+ * `pressButtonZones` is pure so the game renders the same zones
+ * it detects against.
  *
  * Pure + stateful, modelled on the deleted StarJumpDetector: one
  * event per hold — after firing it re-arms only once a wrist leaves
@@ -48,9 +54,11 @@ export interface PressWrist {
 /**
  * Pure zone placement: the two button zones for a body standing at
  * (`hipMidX`, `hipMidY`) with torso length `torsoLength` (all
- * normalized video space). Left centre at hip-mid − 0.8 torso,
- * right centre at hip-mid + 0.8 torso, tops at the hip line −
- * 0.15 torso, each zone 0.5 wide × 0.4 tall in torso lengths.
+ * normalized video space). Left centre at hip-mid − 0.55 torso,
+ * right centre at hip-mid + 0.55 torso, tops at the hip line +
+ * 0.02 torso, each zone 0.25 wide × 0.2 tall in torso lengths —
+ * fist-sized buttons at resting hand height (v3.5; was ±0.8,
+ * hip − 0.15, 0.5 × 0.4 in v3.4).
  */
 export function pressButtonZones(
   hipMidX: number,

@@ -27,7 +27,12 @@
  *   side of the avatar; both wrists on the buttons + a downward push,
  *   held 300 ms, counts one press. No vertical space, no legs, hands
  *   stay separated (which also dodges the handedness-latch flip that
- *   meeting hands overhead used to trigger).
+ *   meeting hands overhead used to trigger). v3.5 shrank them: the
+ *   v3.4 pedestals were giant gold slabs at the far bottom corners
+ *   that covered the pile/hopper labels and the Leave chip, with no
+ *   distinct button. Now each pedestal is a slim post with a small
+ *   pad that IS the detection zone, at resting-hand height beside
+ *   the body — see `pedestalRectsForStage`.
  * - After a batch, keep carrying (if you own more ore) or leave to
  *   the hub. Leaving mid-batch ABANDONS it and the carried + hopper
  *   ore returns to inventory — nothing is ever lost to a pause.
@@ -53,7 +58,7 @@ import type { SoundEffects } from '../../core/audio';
 import { assetUrl } from '../../core/assetUrl';
 import { paintButton } from '../../hub/townHub';
 import type { BodyState } from '../../core/bodyState';
-import { PressDetector, pressButtonZones } from '../../core/pressDetector';
+import { PressDetector, pressButtonZones, type PressRect } from '../../core/pressDetector';
 import { inventory } from '../../core/inventory';
 import { toCanvas } from '../../render/stage';
 import type { NormalizedLandmark } from '../../tracking/poseTypes';
@@ -114,6 +119,201 @@ export function pointInZone(
   zone: RefinerZone,
 ): boolean {
   return x >= zone.x && x <= zone.x + zone.w && y >= zone.y && y <= zone.y + zone.h;
+}
+
+/** True when two canvas rects overlap (shared edges do not count). */
+export function rectsIntersect(a: RefinerZone, b: RefinerZone): boolean {
+  return (
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+  );
+}
+
+/**
+ * Pile / hopper labels sit this far ABOVE their zones (v3.5): the
+ * pedestal posts run from the buttons all the way to the stage
+ * bottom, so a label below the zones would sit right across a post
+ * (v3.4: the slabs covered the "Hopper: 2/2" label and the top edge
+ * of the "Leave to town" chip). Above the zones the labels clear
+ * everything — the title banner is far above, the buttons far below.
+ * 16 px (not 14): the 30 px estimate rect in `textLabelRect` must
+ * clear the zone top, not just the real glyphs.
+ */
+const LABEL_ABOVE_PX = 16;
+
+/**
+ * Estimated canvas rect of a centred text label, for overlap tests.
+ * 22 px bold game font averages ~12 px per character; 13 px is the
+ * conservative estimate, so a label that clears this rect clears the
+ * real text too. Height 30 covers the 22 px glyphs + the dark stroke.
+ */
+export function textLabelRect(
+  cx: number,
+  cy: number,
+  text: string,
+): RefinerZone {
+  const w = Math.max(1, text.length * 13);
+  return { x: cx - w / 2, y: cy - 15, w, h: 30 };
+}
+
+/** The exact label strings drawPile / drawHopper print. */
+export function pileLabelText(shown: number, owned: number): string {
+  return `Ore pile: ${shown} shown · ${owned} owned`;
+}
+
+export function hopperLabelText(fill: number, capacity: number): string {
+  return `Hopper: ${fill}/${capacity}`;
+}
+
+/** Canvas rect of the pile label for a stage (label sits above the pile). */
+export function pileLabelRect(
+  width: number,
+  height: number,
+  shown: number,
+  owned: number,
+): RefinerZone {
+  const pile = pileZoneForStage(width, height);
+  return textLabelRect(
+    pile.x + pile.w / 2,
+    pile.y - LABEL_ABOVE_PX,
+    pileLabelText(shown, owned),
+  );
+}
+
+/** Canvas rect of the hopper label for a stage (label sits above the hopper). */
+export function hopperLabelRect(
+  width: number,
+  height: number,
+  fill: number,
+  capacity: number,
+): RefinerZone {
+  const hopper = hopperZoneForStage(width, height);
+  return textLabelRect(
+    hopper.x + hopper.w / 2,
+    hopper.y - LABEL_ABOVE_PX,
+    hopperLabelText(fill, capacity),
+  );
+}
+
+/** Canvas rect of the "Leave to town" chip for a stage. */
+export function leaveChipRect(width: number, height: number): RefinerZone {
+  const leave = pickerCardLayout(width, height).leave;
+  return { x: leave.x, y: leave.y, w: leave.w, h: leave.h };
+}
+
+/**
+ * Canvas-space torso box for the sim body standing at
+ * (`hipMidX`, `hipMidY`) with torso length `torsoLength`: shoulders
+ * ±`SIM.shoulderWidth` / 2 around the hip-mid, shoulder line to hip
+ * line. The test reference for "the pedestals clear the avatar" —
+ * a real body is wider or narrower, but the sim body is the geometry
+ * the game itself lays out against.
+ */
+export function simTorsoBox(
+  width: number,
+  height: number,
+  hipMidX = 0.5,
+  hipMidY: number = SIM.standingHipY,
+  torsoLength: number = SIM.torsoLength,
+): RefinerZone {
+  const topLeft = toCanvas(
+    { x: hipMidX - SIM.shoulderWidth / 2, y: hipMidY - torsoLength, visibility: 1 },
+    width,
+    height,
+  );
+  const bottomRight = toCanvas(
+    { x: hipMidX + SIM.shoulderWidth / 2, y: hipMidY, visibility: 1 },
+    width,
+    height,
+  );
+  return {
+    x: Math.min(topLeft.x, bottomRight.x),
+    y: Math.min(topLeft.y, bottomRight.y),
+    w: Math.abs(bottomRight.x - topLeft.x),
+    h: Math.abs(bottomRight.y - topLeft.y),
+  };
+}
+
+/**
+ * One pedestal's canvas rects: the button pad + the post under it.
+ */
+export interface PedestalRects {
+  button: RefinerZone;
+  post: RefinerZone;
+}
+
+/**
+ * Pedestal geometry (v3.5) — pure, single source for render + tests.
+ *
+ * Each pedestal is a slim post with a small pad on top. The button
+ * pad rect IS the detection zone rect from `pressButtonZones` —
+ * same helper, one source, no invisible extra area and no drawn
+ * area that does not detect (v3.4's bug was the drawn slabs being
+ * far bigger than the zones). The post is narrower than its pad
+ * (65% of the pad width), centred under it, running from the pad's
+ * rest bottom to the stage bottom — a post, not a wall.
+ *
+ * The pad sinks as the press hold progresses, to full
+ * `PRESS.pressDepthTorsoFrac` at hold-complete — capped at half the
+ * pad's own height, so at the new small size the pad presses INTO
+ * the post instead of vanishing into it. The post top stays at the
+ * pad's REST bottom while the pad sinks over it.
+ *
+ * `slideT` 0..1 slides the whole pedestal up from below the stage
+ * (same easing as the old draw code: at 0 the pad top sits at the
+ * stage bottom); `pressProgress` 0..1 is the detector's live
+ * progress (2/3 = both wrists in their zones, 1 = hold complete).
+ */
+export function pedestalRectsForStage(
+  width: number,
+  height: number,
+  hipMidX: number,
+  hipMidY: number,
+  torsoLength: number,
+  slideT = 1,
+  pressProgress = 0,
+): { left: PedestalRects; right: PedestalRects } {
+  const zones = pressButtonZones(hipMidX, hipMidY, torsoLength);
+  const sinkFrac = Math.min(
+    1,
+    Math.max(0, (pressProgress - 2 / 3) * 3),
+  );
+  const rectFor = (zone: PressRect): PedestalRects => {
+    // toCanvas mirrors x: the video-space left zone is the
+    // canvas-right pedestal. Take min/max, not the raw corners.
+    const top = toCanvas(
+      { x: zone.x, y: zone.y, visibility: 1 },
+      width,
+      height,
+    );
+    const bottom = toCanvas(
+      { x: zone.x + zone.w, y: zone.y + zone.h, visibility: 1 },
+      width,
+      height,
+    );
+    const bx = Math.min(top.x, bottom.x);
+    const bw = Math.abs(bottom.x - top.x);
+    const by = top.y;
+    const bh = bottom.y - top.y;
+    // Slide: at slideT 0 the pad top sits at the stage bottom
+    // (fully below the screen); at 1 it sits at its zone.
+    const dy = (1 - slideT) * (height - by);
+    const depressPx =
+      Math.min(
+        PRESS.pressDepthTorsoFrac * torsoLength * height,
+        bh * 0.5,
+      ) * sinkFrac;
+    const postW = bw * 0.65;
+    return {
+      button: { x: bx, y: by + dy + depressPx, w: bw, h: bh },
+      post: {
+        x: bx + (bw - postW) / 2,
+        y: by + dy + bh,
+        w: postW,
+        h: Math.max(0, height - (by + dy + bh)),
+      },
+    };
+  };
+  return { left: rectFor(zones.left), right: rectFor(zones.right) };
 }
 
 /**
@@ -216,6 +416,9 @@ export const PEDESTAL_STYLE = {
   columnEdge: '#23262e',
   button: '#ffd166',
   buttonEdge: '#b8860b',
+  /** Lighter gold strip across the pad face — at the new small size
+   * this is what makes the pad read as a button, not a flat tile. */
+  buttonTop: '#ffe08a',
   // Deeper gold than the buttons, on purpose: tests (and eyes)
   // tell the forging bar apart from the buttons by colour alone.
   bar: '#e8a93d',
@@ -838,9 +1041,12 @@ export class RefinerGame implements Game {
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.lineWidth = 5;
-    const label = `Ore pile: ${shown} shown · ${snap.ownedInput} owned`;
-    ctx.strokeText(label, pile.x + pile.w / 2, pile.y + pile.h + 24);
-    ctx.fillText(label, pile.x + pile.w / 2, pile.y + pile.h + 24);
+    // Label ABOVE the pile (v3.5): the pedestal posts run to the
+    // stage bottom, so a label below the pile would sit across a
+    // post. See `pileLabelRect` — same position, one source.
+    const label = pileLabelText(snap.pileVisible, snap.ownedInput);
+    ctx.strokeText(label, pile.x + pile.w / 2, pile.y - LABEL_ABOVE_PX);
+    ctx.fillText(label, pile.x + pile.w / 2, pile.y - LABEL_ABOVE_PX);
     ctx.restore();
   }
 
@@ -917,9 +1123,11 @@ export class RefinerGame implements Game {
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.lineWidth = 5;
-    const label = `Hopper: ${snap.hopperFill}/${REFINER.hopperCapacity}`;
-    ctx.strokeText(label, hopper.x + hopper.w / 2, hopper.y + hopper.h + 24);
-    ctx.fillText(label, hopper.x + hopper.w / 2, hopper.y + hopper.h + 24);
+    // Label ABOVE the hopper (v3.5): same reason as the pile label —
+    // the posts run to the stage bottom (see `hopperLabelRect`).
+    const label = hopperLabelText(snap.hopperFill, REFINER.hopperCapacity);
+    ctx.strokeText(label, hopper.x + hopper.w / 2, hopper.y - LABEL_ABOVE_PX);
+    ctx.fillText(label, hopper.x + hopper.w / 2, hopper.y - LABEL_ABOVE_PX);
     ctx.restore();
   }
 
@@ -963,23 +1171,20 @@ export class RefinerGame implements Game {
   }
 
   /**
-   * Pedestals (v3.4): two columns with a big button on top, at the
-   * detector's zones (`pressButtonZones`, normalized video space —
-   * converted to canvas with `toCanvas`, so the mirror applies).
-   * They slide up from below the stage over `PRESS.slideMs` when the
-   * hopper fills and back down on batch-complete / leave. The button
-   * sinks as the press hold progresses: `pressProgress` is 2/3 the
-   * moment both wrists are in their zones (2 of 3 progress parts)
-   * and 1 when the hold completes, so the sink runs from 0 at 2/3
-   * to full `PRESS.pressDepthTorsoFrac` at 1 — and stays down while
-   * the hands stay on the buttons after a counted press.
+   * Pedestals (v3.5): slim posts with small pads, rendered from
+   * `pedestalRectsForStage` — the pads ARE the detector's zones, so
+   * what the player sees is exactly what detects (v3.4's slabs were
+   * drawn far bigger than the zones and covered the pile/hopper
+   * labels and the Leave chip). The pads sit at resting-hand height
+   * where the zones sit; the press is a small downward push, not a
+   * big travel. The pads sink into their posts as the hold
+   * progresses (see the helper for the sink cap); a lighter strip
+   * across the pad face is what reads as a button at this size.
    *
-   * The column is narrower than the button (60%): a post, not a wall,
-   * so it covers less of the pile/hopper behind it. The buttons sit
-   * at waist height where the hands naturally rest, so they overlap
-   * the pile/hopper edges on screen — the buttons draw after the
-   * pile/hopper, per the layering order, and only while pressing,
-   * when the pile is done being used for this batch.
+   * They slide up from below the stage over `PRESS.slideMs` when
+   * the hopper fills and back down on batch-complete / leave. The
+   * pile/hopper labels moved above their zones in v3.5 so the posts
+   * — which run to the stage bottom — never cross a label.
    */
   private drawPedestals(
     ctx: CanvasRenderingContext2D,
@@ -998,51 +1203,50 @@ export class RefinerGame implements Game {
       body !== null && body.present && body.torsoLength > 0
         ? body.torsoLength
         : this.lastTorsoLength;
-    const zones = pressButtonZones(hipMidX, hipMidY, torsoLength);
-    // Button sink: 0 while the hands are off the buttons, full depth
-    // when the hold completes (pressProgress 1), held while the
-    // hands stay down after a counted press.
-    const sinkFrac = Math.min(
-      1,
-      Math.max(0, (this.lastPressProgress - 2 / 3) * 3),
+    const rects = pedestalRectsForStage(
+      width,
+      height,
+      hipMidX,
+      hipMidY,
+      torsoLength,
+      slideT,
+      this.lastPressProgress,
     );
-    const depressPx =
-      PRESS.pressDepthTorsoFrac * torsoLength * height * sinkFrac;
     ctx.save();
-    for (const zone of [zones.left, zones.right]) {
-      // toCanvas mirrors x: the video-space left zone is the
-      // canvas-right button. Take min/max, not the raw corners.
-      const top = toCanvas(
-        { x: zone.x, y: zone.y, visibility: 1 },
-        width,
-        height,
-      );
-      const bottom = toCanvas(
-        { x: zone.x + zone.w, y: zone.y + zone.h, visibility: 1 },
-        width,
-        height,
-      );
-      const bx = Math.min(top.x, bottom.x);
-      const bw = Math.abs(bottom.x - top.x);
-      const by = top.y;
-      const bh = bottom.y - top.y;
-      // Slide: at slideT 0 the button top sits at the stage bottom
-      // (fully below the screen); at 1 it sits at its zone.
-      const dy = (1 - slideT) * (height - by);
-      const buttonY = by + dy + depressPx;
-      const columnW = bw * 0.6;
-      const columnX = bx + (bw - columnW) / 2;
-      const columnTop = buttonY + bh;
-      ctx.fillStyle = PEDESTAL_STYLE.column;
-      ctx.fillRect(columnX, columnTop, columnW, height - columnTop);
-      ctx.strokeStyle = PEDESTAL_STYLE.columnEdge;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(columnX, columnTop, columnW, height - columnTop);
+    for (const side of [rects.left, rects.right]) {
+      // Post first (behind), pad on top: a sunk pad overlaps the
+      // post's top and reads as pressed into it.
+      if (side.post.h > 0) {
+        ctx.fillStyle = PEDESTAL_STYLE.column;
+        ctx.fillRect(side.post.x, side.post.y, side.post.w, side.post.h);
+        ctx.strokeStyle = PEDESTAL_STYLE.columnEdge;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(side.post.x, side.post.y, side.post.w, side.post.h);
+      }
       ctx.fillStyle = PEDESTAL_STYLE.button;
-      ctx.fillRect(bx, buttonY, bw, bh);
+      ctx.fillRect(
+        side.button.x,
+        side.button.y,
+        side.button.w,
+        side.button.h,
+      );
       ctx.strokeStyle = PEDESTAL_STYLE.buttonEdge;
       ctx.lineWidth = 3;
-      ctx.strokeRect(bx, buttonY, bw, bh);
+      ctx.strokeRect(
+        side.button.x,
+        side.button.y,
+        side.button.w,
+        side.button.h,
+      );
+      // Pad face: a lighter strip across the top of the pad.
+      const hlH = Math.max(2, Math.min(4, side.button.h * 0.18));
+      ctx.fillStyle = PEDESTAL_STYLE.buttonTop;
+      ctx.fillRect(
+        side.button.x + 2,
+        side.button.y + 2,
+        Math.max(0, side.button.w - 4),
+        hlH,
+      );
     }
     ctx.restore();
   }

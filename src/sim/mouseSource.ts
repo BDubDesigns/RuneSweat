@@ -16,15 +16,16 @@
  * - `W` (hold): jump. `S` (hold): duck. (v3.1: Space used to be jump;
  *   Space is now the pause toggle in main.ts, so jump moved to W. The
  *   real-camera body jump is unaffected — it comes from landmarks.)
- * - `P` (hold): press both forge buttons — for the refiner (v3.4).
- *   Both wrists animate out to the pedestal buttons (hip-mid ±0.8
- *   torso, at the hip line) and push down to hip line + 0.12 torso
- *   while held; release returns them to rest. The press is a
- *   deliberate downward push: the wrists travel down into the button
- *   zones, they do not teleport into them. `X` (legs wide) is gone
- *   with the star jumps — the sim can now play a full refiner batch.
- *   `W` jump stays as a general sim capability (it still drives
- *   `BodyState.jumping`, shown in the debug HUD) — it is just no
+ * - `P` (hold): press both forge buttons — for the refiner (v3.4,
+ *   retargeted v3.5). Both wrists animate out to the pedestal buttons
+ *   (from `PRESS`: hip-mid ±`buttonOffsetTorsoFrac`, at the zone top
+ *   `buttonZoneTopOffsetTorsoFrac`) and push down to hip line +
+ *   `pressDepthTorsoFrac` while held; release returns them to rest.
+ *   The press is a deliberate downward push: the wrists travel down
+ *   into the button zones, they do not teleport into them. `X` (legs
+ *   wide) is gone with the star jumps — the sim can now play a full
+ *   refiner batch. `W` jump stays as a general sim capability (it still
+ *   drives `BodyState.jumping`, shown in the debug HUD) — it is just no
  *   longer the refiner's input.
  *
  * Two-handed clasp (Swing Lab v2): when BOTH arms are raised straight up
@@ -50,7 +51,7 @@
  * until the arms rest again.
  */
 
-import { SIM } from '../core/config';
+import { PRESS, SIM } from '../core/config';
 import { PoseLandmark, type PoseFrameSource, type RawPoseFrame, type NormalizedLandmark } from '../tracking/poseTypes';
 import { clamp, lerp } from '../render/stage';
 
@@ -64,17 +65,16 @@ const CLASP_RELEASE_GRACE_MS = 500;
 
 /**
  * Press animation time (ms, v3.4): `P` held drives `pressT` 0 -> 1.
- * First half: wrists travel out to the buttons at the hip line;
- * second half: they push down to hip line + 0.12 torso. The push
- * half is ~120 ms, so the downward leg runs at ~1 torso length/s
- * raw — a deliberate push the press detector can read as downward
- * motion, not a teleport into the zones.
+ * First half: wrists travel out to the buttons at the zone top
+ * (`PRESS.buttonZoneTopOffsetTorsoFrac`); second half: they push
+ * down to hip line + `PRESS.pressDepthTorsoFrac`. The push half is
+ * ~120 ms, so the downward leg runs at ~1 torso length/s raw — a
+ * deliberate push the press detector can read as downward motion,
+ * not a teleport into the zones. Button offset and depth come from
+ * `PRESS` (v3.5): the sim must press the same zones the detector
+ * reads, or the sim batch can never complete.
  */
 const PRESS_ANIM_MS = 240;
-/** Button centres sit this far from hip-mid, in torso lengths. */
-const PRESS_BUTTON_OFFSET_TORSO_FRAC = 0.8;
-/** Pressed wrists sit this far below the hip line, in torso lengths. */
-const PRESS_DEPTH_TORSO_FRAC = 0.12;
 
 interface ArmSim {
   /** 0 = down, 1 = fully raised. Animates toward `target`. */
@@ -294,28 +294,32 @@ export class MouseSource implements PoseFrameSource {
         );
       }
       if (this.pressT > 0) {
-        // Forge press (v3.4): both wrists leave wherever they were and
-        // press the pedestal buttons — the same numbers as the
-        // detector's zones (core/pressDetector): centres at hip-mid
-        // ±0.8 torso, zone top at hip − 0.15 torso, pressed depth
-        // hip + 0.12 torso. First half of pressT: travel out to the
-        // buttons at the hip line (blended from the current wrist, so
-        // no teleport); second half: the deliberate downward push
-        // into the pressed position. On release pressT runs back
-        // down and the wrists return to rest the same way.
+        // Forge press (v3.4, retargeted v3.5): both wrists leave
+        // wherever they were and press the pedestal buttons — the
+        // same numbers as the detector's zones (core/pressDetector,
+        // from PRESS): centres at hip-mid ±buttonOffsetTorsoFrac,
+        // zone top at hip + buttonZoneTopOffsetTorsoFrac, pressed
+        // depth hip + pressDepthTorsoFrac. First half of pressT:
+        // travel out to the buttons at the zone top (blended from the
+        // current wrist, so no teleport); second half: the deliberate
+        // downward push into the pressed position. On release pressT
+        // runs back down and the wrists return to rest the same way.
         const dir = side === 'left' ? -1 : 1;
-        const buttonX = torsoX + dir * PRESS_BUTTON_OFFSET_TORSO_FRAC * SIM.torsoLength;
-        const pressedY = hipY + PRESS_DEPTH_TORSO_FRAC * SIM.torsoLength;
+        const buttonX =
+          torsoX + dir * PRESS.buttonOffsetTorsoFrac * SIM.torsoLength;
+        const zoneTopY =
+          hipY + PRESS.buttonZoneTopOffsetTorsoFrac * SIM.torsoLength;
+        const pressedY = hipY + PRESS.pressDepthTorsoFrac * SIM.torsoLength;
         let px: number;
         let py: number;
         if (this.pressT <= 0.5) {
           const t = this.pressT / 0.5;
           px = lerp(wrist.x, buttonX, t);
-          py = lerp(wrist.y, hipY, t);
+          py = lerp(wrist.y, zoneTopY, t);
         } else {
           const t = (this.pressT - 0.5) / 0.5;
           px = buttonX;
-          py = lerp(hipY, pressedY, t);
+          py = lerp(zoneTopY, pressedY, t);
         }
         wrist = lm(px, py);
         elbow = lm(

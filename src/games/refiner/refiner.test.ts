@@ -6,6 +6,7 @@ import { BodyStateTracker } from '../../core/bodyState';
 import { inventory } from '../../core/inventory';
 import { MouseSource } from '../../sim/mouseSource';
 import {
+  PEDESTAL_STYLE,
   PICKER_CARD,
   RefinerGame,
   hopperZoneForStage,
@@ -25,33 +26,22 @@ function toVideo(canvasX: number, canvasY: number): { x: number; y: number } {
 
 /**
  * Synthetic body for the game: both wrists at one canvas point
- * (hands together), or a star-jump shape. The game only reads wrist
- * X/Y + shoulder Y + torso length + jumping + ankle spread, so a
- * fake body is exact here.
+ * (hands together), or a pedestal-press shape. The game only reads
+ * wrist X/Y + hip-mid + torso length + jumping, so a fake body is
+ * exact here. Hip-mid is `torsoX`/`torsoY` (BodyState carries the
+ * smoothed hip-midpoint directly — there are no per-hip fields).
  */
 function makeBody(options: {
   handCanvas?: { x: number; y: number };
-  starJump?: boolean;
 } = {}): BodyState {
   const hand = options.handCanvas ?? { x: 480, y: 300 };
   const video = toVideo(hand.x, hand.y);
   const torsoLength = 0.3;
-  if (options.starJump === true) {
-    return {
-      present: true,
-      torsoLength,
-      shoulderY: 0.25,
-      leftWristX: 0.3,
-      rightWristX: 0.7,
-      leftWristY: 0.2,
-      rightWristY: 0.2,
-      jumping: true,
-      ankleSpreadTorsoFrac: 1.2,
-    } as unknown as BodyState;
-  }
   return {
     present: true,
     torsoLength,
+    torsoX: 0.5,
+    torsoY: 0.55,
     shoulderY: 0.25,
     leftWristX: video.x,
     rightWristX: video.x,
@@ -62,6 +52,43 @@ function makeBody(options: {
   } as unknown as BodyState;
 }
 
+/**
+ * Press body for the game: both wrists inside the detector's button
+ * zones, moving downward into the pressed position, then holding.
+ * Zones (`core/pressDetector`) for hip-mid (0.5, 0.55), torso 0.3:
+ * left x 0.185..0.335, right x 0.665..0.815, y 0.505..0.625.
+ * `elapsedMs` is ms since this press started: the wrists travel
+ * from the zone top (0.505) down to the pressed depth (0.586, hip
+ * line + 0.12 torso) over ~270 ms, then hold still. The detector
+ * needs downward motion at some point in the hold + a 300 ms hold,
+ * so each press is held ~900 ms in the tests.
+ */
+function pressBody(elapsedMs: number): BodyState {
+  const frames = Math.floor(elapsedMs / 16);
+  const y = Math.min(0.586, 0.505 + 0.005 * frames);
+  return {
+    present: true,
+    torsoLength: 0.3,
+    torsoX: 0.5,
+    torsoY: 0.55,
+    shoulderY: 0.25,
+    leftWristX: 0.26,
+    rightWristX: 0.74,
+    leftWristY: y,
+    rightWristY: y,
+    jumping: false,
+    ankleSpreadTorsoFrac: 0.59,
+  } as unknown as BodyState;
+}
+
+/** Press body with only the LEFT wrist on its button (right at rest). */
+function oneWristBody(elapsedMs: number): BodyState {
+  const body = pressBody(elapsedMs);
+  body.rightWristX = 0.5;
+  body.rightWristY = 0.556;
+  return body;
+}
+
 const REST = makeBody();
 const OVER_PILE = makeBody({
   handCanvas: { x: PILE.x + PILE.w / 2, y: PILE.y + PILE.h / 2 },
@@ -69,7 +96,6 @@ const OVER_PILE = makeBody({
 const OVER_HOPPER = makeBody({
   handCanvas: { x: HOPPER.x + HOPPER.w / 2, y: HOPPER.y + HOPPER.h / 2 },
 });
-const STAR_JUMP_BODY = makeBody({ starJump: true });
 
 function stubContext(): CanvasRenderingContext2D {
   const target: Record<string, unknown> = {};
@@ -156,7 +182,7 @@ describe('RefinerGame', () => {
     expect(game.selectRecipe('refined-ferrite')).toBe(false);
   });
 
-  it('full batch via synthetic bodies: grab, carry, drop x2, 3 star jumps -> +1 refined, +15 XP', () => {
+  it('full batch via synthetic bodies: grab, carry, drop x2, 3 presses -> +1 refined, +15 XP', () => {
     inventory.add('ferrite-shale', 20);
     const game = new RefinerGame(new SoundEffects());
     game.start();
@@ -168,6 +194,16 @@ describe('RefinerGame', () => {
         game.update(16, t, body, null);
       }
     };
+    /** Step with a body that varies with time (a press in progress). */
+    const stepFnTo = (
+      toMs: number,
+      bodyFn: (elapsedMs: number) => BodyState,
+      startMs: number,
+    ): void => {
+      for (; t < toMs; t += 16) {
+        game.update(16, t, bodyFn(t - startMs), null);
+      }
+    };
     // Grab 1: hold both hands over the pile past the 200 ms dwell.
     stepTo(300, OVER_PILE);
     expect(game.snapshot().carrying).toBe(true);
@@ -175,21 +211,27 @@ describe('RefinerGame', () => {
     // Carry to the hopper.
     stepTo(400, OVER_HOPPER);
     expect(game.snapshot().hopperFill).toBe(1);
-    // Grab 2 + drop 2.
+    expect(game.snapshot().phase).toBe('carrying');
+    // Grab 2 + drop 2: the hopper fills and the press phase starts.
     stepTo(700, OVER_PILE);
     expect(game.snapshot().carrying).toBe(true);
     stepTo(800, OVER_HOPPER);
     expect(game.snapshot().hopperFill).toBe(2);
-    expect(game.snapshot().phase).toBe('jumping');
-    // 3 star jumps (land between jumps so the detector re-arms).
-    stepTo(1400, STAR_JUMP_BODY);
-    expect(game.snapshot().jumpsDone).toBe(1);
-    stepTo(1500, REST);
-    stepTo(2100, STAR_JUMP_BODY);
-    expect(game.snapshot().jumpsDone).toBe(2);
-    stepTo(2200, REST);
-    stepTo(2800, STAR_JUMP_BODY);
-    expect(game.snapshot().jumpsDone).toBe(0);
+    expect(game.snapshot().phase).toBe('pressing');
+    // Pedestals slide in over 400 ms — the detector only runs once
+    // they are fully up, so wait them out before pressing.
+    stepTo(1300, REST);
+    expect(game.snapshot().pedestalSlideT).toBe(1);
+    // 3 presses (hold ~900 ms each, rest ~600 ms between so the
+    // detector re-arms + clears its 500 ms minimum interval).
+    stepFnTo(2200, pressBody, 1300);
+    expect(game.snapshot().pressesDone).toBe(1);
+    stepTo(2800, REST);
+    stepFnTo(3700, pressBody, 2800);
+    expect(game.snapshot().pressesDone).toBe(2);
+    stepTo(4300, REST);
+    stepFnTo(5200, pressBody, 4300);
+    expect(game.snapshot().pressesDone).toBe(0);
     expect(game.snapshot().batchesDone).toBe(1);
     expect(inventory.count('refined-ferrite')).toBe(1);
     expect(inventory.count('ferrite-shale')).toBe(18);
@@ -199,6 +241,118 @@ describe('RefinerGame', () => {
     // for the next batch while the player still owns ore.
     expect(game.snapshot().phase).toBe('carrying');
     expect(game.snapshot().pileVisible).toBe(10);
+  });
+
+  it('one wrist only does NOT count (game level)', () => {
+    inventory.add('ferrite-shale', 20);
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    expect(game.selectRecipe('refined-ferrite')).toBe(true);
+    let t = 0;
+    const stepTo = (toMs: number, body: BodyState): void => {
+      for (; t < toMs; t += 16) game.update(16, t, body, null);
+    };
+    const stepFnTo = (
+      toMs: number,
+      bodyFn: (elapsedMs: number) => BodyState,
+      startMs: number,
+    ): void => {
+      for (; t < toMs; t += 16) game.update(16, t, bodyFn(t - startMs), null);
+    };
+    stepTo(300, OVER_PILE);
+    stepTo(400, OVER_HOPPER);
+    stepTo(700, OVER_PILE);
+    stepTo(800, OVER_HOPPER);
+    expect(game.snapshot().phase).toBe('pressing');
+    stepTo(1300, REST);
+    // Left wrist presses for a full second; the right wrist never
+    // leaves the centre. No press counts, no batch completes.
+    stepFnTo(2300, oneWristBody, 1300);
+    expect(game.snapshot().pressesDone).toBe(0);
+    expect(game.snapshot().batchesDone).toBe(0);
+    expect(game.snapshot().pressProgress).toBeLessThan(0.5);
+  });
+
+  it('pedestals slide in on entering the press phase and out on batch-complete', () => {
+    inventory.add('ferrite-shale', 20);
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    expect(game.selectRecipe('refined-ferrite')).toBe(true);
+    let t = 0;
+    const stepTo = (toMs: number, body: BodyState): void => {
+      for (; t < toMs; t += 16) game.update(16, t, body, null);
+    };
+    const stepFnTo = (
+      toMs: number,
+      bodyFn: (elapsedMs: number) => BodyState,
+      startMs: number,
+    ): void => {
+      for (; t < toMs; t += 16) game.update(16, t, bodyFn(t - startMs), null);
+    };
+    // No pedestals before the hopper fills.
+    stepTo(300, OVER_PILE);
+    stepTo(400, OVER_HOPPER);
+    expect(game.snapshot().pedestalSlideT).toBe(0);
+    stepTo(700, OVER_PILE);
+    stepTo(800, OVER_HOPPER);
+    expect(game.snapshot().phase).toBe('pressing');
+    // Mid-slide: partway up; fully up 400 ms after entering.
+    stepTo(1000, REST);
+    const mid = game.snapshot().pedestalSlideT;
+    expect(mid).toBeGreaterThan(0);
+    expect(mid).toBeLessThan(1);
+    stepTo(1300, REST);
+    expect(game.snapshot().pedestalSlideT).toBe(1);
+    // Three presses complete the batch; the pedestals slide away.
+    stepFnTo(2200, pressBody, 1300);
+    stepTo(2800, REST);
+    stepFnTo(3700, pressBody, 2800);
+    stepTo(4300, REST);
+    // The 3rd press fires ~300 ms into the hold (~4600), so at 4700
+    // the slide-out is partway; by 5800 it is done.
+    stepFnTo(4700, pressBody, 4300);
+    expect(game.snapshot().batchesDone).toBe(1);
+    const slidingOut = game.snapshot().pedestalSlideT;
+    expect(slidingOut).toBeGreaterThan(0);
+    expect(slidingOut).toBeLessThan(1);
+    stepTo(5800, REST);
+    expect(game.snapshot().pedestalSlideT).toBe(0);
+  });
+
+  it('leaving mid-press returns the ore and slides the pedestals away', () => {
+    inventory.add('ferrite-shale', 10);
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    game.selectRecipe('refined-ferrite');
+    const ctx = stubContext();
+    game.render(ctx, 0, REST, null);
+    let t = 0;
+    for (; t < 300; t += 16) game.update(16, t, OVER_PILE, null);
+    for (; t < 400; t += 16) game.update(16, t, OVER_HOPPER, null);
+    for (; t < 700; t += 16) game.update(16, t, OVER_PILE, null);
+    for (; t < 800; t += 16) game.update(16, t, OVER_HOPPER, null);
+    expect(game.snapshot().phase).toBe('pressing');
+    expect(game.snapshot().hopperFill).toBe(2);
+    for (; t < 1300; t += 16) game.update(16, t, REST, null);
+    expect(game.snapshot().pedestalSlideT).toBe(1);
+    // Leave chip: bottom-left, x 12..232, y 488..528.
+    let left = false;
+    game.onLeaveToHub = () => {
+      left = true;
+    };
+    expect(game.pointerDownAt(100, 508, 1500)).toBe(true);
+    expect(left).toBe(true);
+    // Carried (0) + hopper (2) ore returns: 10 - 2 grabbed + 2 back.
+    expect(inventory.count('ferrite-shale')).toBe(10);
+    expect(game.snapshot().phase).toBe('pick');
+    // Pedestals slide away over 400 ms after the leave (the leave
+    // itself is at 1500; at 1700 the slide is partway, at 2000 done).
+    for (; t < 1700; t += 16) game.update(16, t, REST, null);
+    const slidingOut = game.snapshot().pedestalSlideT;
+    expect(slidingOut).toBeGreaterThan(0);
+    expect(slidingOut).toBeLessThan(1);
+    for (; t < 2000; t += 16) game.update(16, t, REST, null);
+    expect(game.snapshot().pedestalSlideT).toBe(0);
   });
 
   it('leaving mid-batch returns the ore (pointer: Leave to town)', () => {
@@ -257,6 +411,180 @@ describe('RefinerGame', () => {
       ),
     ).toBe(false);
     expect(rec.fillStyles).toContain(BUTTON_STYLES.secondary.lip);
+  });
+});
+
+/**
+ * Pedestal rendering (v3.4): slide-in/out, button sink, forging-bar
+ * squash — asserted against a recording context that captures every
+ * fillRect with the fill style in force at the time.
+ */
+describe('RefinerGame pedestals + forging bar (v3.4)', () => {
+  function fillRecordingContext(): {
+    ctx: CanvasRenderingContext2D;
+    fills: { x: number; y: number; w: number; h: number; style: string }[];
+  } {
+    const fills: { x: number; y: number; w: number; h: number; style: string }[] = [];
+    let fillStyle = '';
+    const target: Record<string, unknown> = {};
+    const ctx = new Proxy(target, {
+      get: (_t, prop) => {
+        if (prop === 'canvas') return { width: 960, height: 540 };
+        if (prop === 'fillRect') {
+          return (x: number, y: number, w: number, h: number) => {
+            fills.push({ x, y, w, h, style: fillStyle });
+          };
+        }
+        if (prop === 'createLinearGradient') {
+          return () => ({ addColorStop: () => {} });
+        }
+        if (prop === 'measureText') return () => ({ width: 0 });
+        return () => undefined;
+      },
+      set: (t, prop, value) => {
+        if (prop === 'fillStyle') fillStyle = String(value);
+        t[prop as string] = value;
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx, fills };
+  }
+
+  /** Drive a game to the press phase with pedestals fully up. */
+  function gamePressing(): {
+    game: RefinerGame;
+    t: number;
+    stepTo: (toMs: number, body: BodyState) => void;
+    stepFnTo: (
+      toMs: number,
+      bodyFn: (elapsedMs: number) => BodyState,
+      startMs: number,
+    ) => void;
+  } {
+    inventory.reset();
+    inventory.add('ferrite-shale', 20);
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    expect(game.selectRecipe('refined-ferrite')).toBe(true);
+    let t = 0;
+    const stepTo = (toMs: number, body: BodyState): void => {
+      for (; t < toMs; t += 16) game.update(16, t, body, null);
+    };
+    const stepFnTo = (
+      toMs: number,
+      bodyFn: (elapsedMs: number) => BodyState,
+      startMs: number,
+    ): void => {
+      for (; t < toMs; t += 16) game.update(16, t, bodyFn(t - startMs), null);
+    };
+    stepTo(300, OVER_PILE);
+    stepTo(400, OVER_HOPPER);
+    stepTo(700, OVER_PILE);
+    stepTo(800, OVER_HOPPER);
+    expect(game.snapshot().phase).toBe('pressing');
+    stepTo(1300, REST);
+    expect(game.snapshot().pedestalSlideT).toBe(1);
+    return {
+      game,
+      get t() {
+        return t;
+      },
+      stepTo,
+      stepFnTo,
+    };
+  }
+
+  it('pedestals draw only while pressing (not while carrying, not after slide-out)', () => {
+    inventory.reset();
+    inventory.add('ferrite-shale', 20);
+    const game = new RefinerGame(new SoundEffects());
+    game.start();
+    expect(game.selectRecipe('refined-ferrite')).toBe(true);
+    let t = 0;
+    const stepTo = (toMs: number, body: BodyState): void => {
+      for (; t < toMs; t += 16) game.update(16, t, body, null);
+    };
+    // Carrying: no pedestals.
+    stepTo(300, OVER_PILE);
+    let rec = fillRecordingContext();
+    game.render(rec.ctx, t, REST, null);
+    expect(
+      rec.fills.filter((f) => f.style === PEDESTAL_STYLE.column),
+    ).toHaveLength(0);
+    // Pressing, fully up: two columns + two buttons.
+    stepTo(400, OVER_HOPPER);
+    stepTo(700, OVER_PILE);
+    stepTo(800, OVER_HOPPER);
+    stepTo(1300, REST);
+    rec = fillRecordingContext();
+    game.render(rec.ctx, 1300, REST, null);
+    expect(
+      rec.fills.filter((f) => f.style === PEDESTAL_STYLE.column),
+    ).toHaveLength(2);
+    expect(
+      rec.fills.filter((f) => f.style === PEDESTAL_STYLE.button),
+    ).toHaveLength(2);
+    // Buttons sit at the detector's zones (hip-mid ±0.8 torso,
+    // top at hip − 0.15 torso): zone top canvas y = 0.505 * 540.
+    for (const button of rec.fills.filter(
+      (f) => f.style === PEDESTAL_STYLE.button,
+    )) {
+      expect(button.y).toBeCloseTo(272.7, 0);
+      expect(button.w).toBeCloseTo(144, 0);
+      expect(button.h).toBeCloseTo(64.8, 0);
+    }
+  });
+
+  it('the forging bar squashes one step per press', () => {
+    const ctx = gamePressing();
+    // Bar: gold fill in the hopper (y > 330 separates it from the
+    // buttons at y ~273). Full height at 0 presses: 0.3 * 162 = 48.6.
+    const barHeights = (): number[] => {
+      const rec = fillRecordingContext();
+      ctx.game.render(rec.ctx, ctx.t, REST, null);
+      return rec.fills
+        .filter((f) => f.style === PEDESTAL_STYLE.bar && f.y > 330)
+        .map((f) => f.h);
+    };
+    const expectBarHeight = (expected: number): void => {
+      const heights = barHeights();
+      expect(heights).toHaveLength(1);
+      expect(heights[0]).toBeCloseTo(expected, 0);
+    };
+    expectBarHeight(48.6);
+    ctx.stepFnTo(ctx.t + 900, pressBody, ctx.t);
+    expect(ctx.game.snapshot().pressesDone).toBe(1);
+    expectBarHeight(32.4);
+    ctx.stepTo(ctx.t + 600, REST);
+    ctx.stepFnTo(ctx.t + 900, pressBody, ctx.t);
+    expect(ctx.game.snapshot().pressesDone).toBe(2);
+    expectBarHeight(16.2);
+  });
+
+  it('the button sinks while a press hold is in progress, and rises at rest', () => {
+    const ctx = gamePressing();
+    const buttonYs = (nowMs: number, body: BodyState): number[] => {
+      const rec = fillRecordingContext();
+      ctx.game.render(rec.ctx, nowMs, body, null);
+      return rec.fills
+        .filter((f) => f.style === PEDESTAL_STYLE.button)
+        .map((f) => f.y);
+    };
+    // At rest the buttons sit at their zones (y 272.7).
+    const atRest = buttonYs(ctx.t, REST);
+    expect(atRest).toHaveLength(2);
+    for (const y of atRest) expect(y).toBeCloseTo(272.7, 0);
+    // Mid-hold the buttons are sunk by the full press depth
+    // (0.12 torso * 540 = 19.44 px) once the hold completes.
+    ctx.stepFnTo(ctx.t + 600, pressBody, ctx.t);
+    const midHold = buttonYs(ctx.t, pressBody(600));
+    expect(midHold).toHaveLength(2);
+    for (const y of midHold) expect(y).toBeCloseTo(292.1, 0);
+    // Hands off again: the buttons rise back to their zones.
+    ctx.stepTo(ctx.t + 600, REST);
+    const risen = buttonYs(ctx.t, REST);
+    expect(risen).toHaveLength(2);
+    for (const y of risen) expect(y).toBeCloseTo(272.7, 0);
   });
 });
 
@@ -324,7 +652,7 @@ describe('RefinerGame via mouse sim', () => {
     expect(ctx.game.snapshot().carrying).toBe(false);
   });
 
-  it('second grab + drop fills the hopper 2/2 and enters the jump phase', () => {
+  it('second grab + drop fills the hopper 2/2 and enters the press phase', () => {
     const ctx = setup();
     let t = grabInSim(ctx, 0);
     t = dropInSim(ctx, t);
@@ -332,49 +660,50 @@ describe('RefinerGame via mouse sim', () => {
     expect(ctx.game.snapshot().carrying).toBe(true);
     dropInSim(ctx, t);
     expect(ctx.game.snapshot().hopperFill).toBe(2);
-    expect(ctx.game.snapshot().phase).toBe('jumping');
+    expect(ctx.game.snapshot().phase).toBe('pressing');
   });
 
-  it('sim star jumps count with the X legs-wide input (v3.1 integration)', () => {
+  it('sim full batch: grab x2, drop x2, 3 presses with P -> +1 refined, +15 XP', () => {
     const ctx = setup();
     let t = grabInSim(ctx, 0);
     t = dropInSim(ctx, t);
     t = grabInSim(ctx, t);
     t = dropInSim(ctx, t);
-    expect(ctx.game.snapshot().phase).toBe('jumping');
-    // W (jump) + Q+E (arms wide) + X (legs wide): all three detector
-    // conditions hold, so the star jumps count in the sim now.
-    ctx.mouse.setJumping(true);
-    ctx.mouse.setKeyArmAngled('left', true);
-    ctx.mouse.setKeyArmAngled('right', true);
-    ctx.mouse.setLegsWide(true);
-    step(ctx, t, t + 1000);
-    ctx.mouse.setJumping(false);
-    ctx.mouse.setKeyArmAngled('left', false);
-    ctx.mouse.setKeyArmAngled('right', false);
-    ctx.mouse.setLegsWide(false);
-    expect(ctx.game.snapshot().jumpsDone).toBeGreaterThanOrEqual(1);
-  });
-
-  it('sim star jumps do NOT count without the legs-wide input', () => {
-    const ctx = setup();
-    let t = grabInSim(ctx, 0);
-    t = dropInSim(ctx, t);
-    t = grabInSim(ctx, t);
-    t = dropInSim(ctx, t);
-    expect(ctx.game.snapshot().phase).toBe('jumping');
-    // W (jump) + Q+E (arms wide): the jump + arms conditions hold,
-    // but the sim's ankles stay at hip width (~0.59 torso), below
-    // the detector's 0.85 legs-apart line. Hold X to spread them.
-    ctx.mouse.setJumping(true);
-    ctx.mouse.setKeyArmAngled('left', true);
-    ctx.mouse.setKeyArmAngled('right', true);
-    step(ctx, t, t + 1000);
-    ctx.mouse.setJumping(false);
-    ctx.mouse.setKeyArmAngled('left', false);
-    ctx.mouse.setKeyArmAngled('right', false);
-    expect(ctx.game.snapshot().jumpsDone).toBe(0);
-    expect(ctx.game.snapshot().batchesDone).toBe(0);
+    expect(ctx.game.snapshot().phase).toBe('pressing');
+    // Pedestals slide in over 400 ms — the detector only runs once
+    // they are fully up, so wait them out before pressing.
+    step(ctx, t, t + 500);
+    t += 500;
+    for (let i = 0; i < 3; i++) {
+      // Hold P ~1200 ms: the press animates down over 240 ms, then
+      // the 300 ms hold completes and the press counts.
+      ctx.mouse.setPressing(true);
+      step(ctx, t, t + 1200);
+      t += 1200;
+      // The 3rd press completes the batch, which resets pressesDone
+      // to 0 — so it reads as batchesDone 1, not pressesDone 3.
+      if (i < 2) expect(ctx.game.snapshot().pressesDone).toBe(i + 1);
+      else expect(ctx.game.snapshot().batchesDone).toBe(1);
+      ctx.mouse.setPressing(false);
+      // Hands back to the centre (A+D clasp) between presses, so the
+      // detector re-arms: the sim's hanging wrists rest just inside
+      // the button zones (0.330 vs the 0.335 edge), so merely letting
+      // go of P would leave it disarmed. A real player's hanging
+      // hands sit well inside the zones' inner edge (~0.4 vs 0.55
+      // torso), so real play re-arms by lowering the hands — this
+      // extra step is a sim artifact, not a game rule.
+      ctx.mouse.setKeyArm('left', true);
+      ctx.mouse.setKeyArm('right', true);
+      step(ctx, t, t + 300);
+      t += 300;
+      ctx.mouse.setKeyArm('left', false);
+      ctx.mouse.setKeyArm('right', false);
+      step(ctx, t, t + 700);
+      t += 700;
+    }
+    expect(ctx.game.snapshot().batchesDone).toBe(1);
+    expect(inventory.count('refined-ferrite')).toBe(1);
+    expect(inventory.xp('refining')).toBe(15);
   });
 });
 
@@ -591,8 +920,8 @@ describe('RefinerGame picker cards (v3.2)', () => {
     const hint = game.snapshot().hint;
     expect(canvasTexts.join('\n')).not.toContain(hint);
     expect(canvasTexts.join('\n')).not.toContain('Got one!');
-    expect(canvasTexts.join('\n')).not.toContain('⭐');
-    expect(canvasTexts.join('\n')).not.toContain('Star jumps:');
+    expect(canvasTexts.join('\n')).not.toContain('🔨');
+    expect(canvasTexts.join('\n')).not.toContain('Presses:');
     // The title banner is the one canvas text allowed up top.
     expect(
       rec.fillTexts.filter((x) => x.text === '🔥 Refined Ferrite'),
@@ -613,16 +942,26 @@ describe('RefinerGame picker cards (v3.2)', () => {
         game.update(16, t, body, null);
       }
     };
+    const stepFnTo = (
+      toMs: number,
+      bodyFn: (elapsedMs: number) => BodyState,
+      startMs: number,
+    ): void => {
+      for (; t < toMs; t += 16) {
+        game.update(16, t, bodyFn(t - startMs), null);
+      }
+    };
     stepTo(300, OVER_PILE);
     stepTo(400, OVER_HOPPER);
     stepTo(700, OVER_PILE);
     stepTo(800, OVER_HOPPER);
-    expect(game.snapshot().phase).toBe('jumping');
-    stepTo(1400, STAR_JUMP_BODY);
-    stepTo(1500, REST);
-    stepTo(2100, STAR_JUMP_BODY);
-    stepTo(2200, REST);
-    stepTo(2800, STAR_JUMP_BODY);
+    expect(game.snapshot().phase).toBe('pressing');
+    stepTo(1300, REST);
+    stepFnTo(2200, pressBody, 1300);
+    stepTo(2800, REST);
+    stepFnTo(3700, pressBody, 2800);
+    stepTo(4300, REST);
+    stepFnTo(5200, pressBody, 4300);
     expect(game.snapshot().batchesDone).toBe(1);
     const rec = recordingContext();
     game.render(rec.ctx, 3000, REST, null);

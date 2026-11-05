@@ -301,7 +301,7 @@ describe('per-activity gate requirements (v3.2)', () => {
       requireKnees: false,
       gracePeriodMs: 1500,
     });
-    expect(gateRequirementsFor('refiner-jump')).toEqual({
+    expect(gateRequirementsFor('refiner-press')).toEqual({
       requireKnees: false,
       gracePeriodMs: 1500,
     });
@@ -336,10 +336,10 @@ describe('per-activity gate requirements (v3.2)', () => {
     expect(swing.reason).toBe('no-body');
   });
 
-  it('the star-jump phase uses the same carry rule (ankles are the detector’s job)', () => {
+  it('the pedestal-press phase uses the same carry rule (the buttons are the detector’s job)', () => {
     const body = kneesHiddenBody();
     const gate = evaluateGate(body, 1000, null, 'ready', {
-      requirements: gateRequirementsFor('refiner-jump'),
+      requirements: gateRequirementsFor('refiner-press'),
     });
     expect(gate.gated).toBe(false);
   });

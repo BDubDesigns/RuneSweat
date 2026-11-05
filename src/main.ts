@@ -53,6 +53,7 @@ import type {
 } from './tracking/poseTypes';
 import { MouseSource } from './sim/mouseSource';
 import { parseReplayClip, ReplaySource } from './sim/replaySource';
+import { versionLabel } from './core/version';
 import type { Game, GameConstructor } from './games/game';
 import { SwingLabGame } from './games/swing-lab/swingLab';
 import { RefinerGame } from './games/refiner/refiner';
@@ -67,7 +68,6 @@ const GAME_CONSTRUCTORS: Record<string, GameConstructor> = {
 
 const GAME_BLURBS: Record<string, string> = {
   'swing-lab': '⛏️ Raise both arms overhead, then chop down to mine Ferrite Shale at The Jag!',
-  lumberjack: '🪓 Chop trees with your body. Coming soon.',
 };
 
 function requireElement<T extends HTMLElement>(id: string, ctor: new () => T): T {
@@ -235,6 +235,10 @@ function main(): void {
   const btnVideo = requireElement('btn-video', HTMLButtonElement);
   const btnRetry = requireElement('btn-retry', HTMLButtonElement);
   const btnFullscreen = requireElement('btn-fullscreen', HTMLButtonElement);
+  // Build version (v3.4): filled from package.json via versionLabel —
+  // never hardcoded, so the select screen always names the build.
+  const versionEl = requireElement('app-version', HTMLElement);
+  versionEl.textContent = versionLabel();
 
   const sfx = new SoundEffects();
   const tracker = new BodyStateTracker();
@@ -459,7 +463,7 @@ function main(): void {
 
   /**
    * Which activity the gate should judge (v3.2): the refiner's picker
-   * has no gate, carry/drop and star jumps use the refiner rule
+   * has no gate, carry/drop and the pedestal press use the refiner rule
    * (shoulders + hips, 1500 ms grace, knees not required), everything
    * else is the swing rule (knees required, 500 ms grace).
    */
@@ -467,7 +471,7 @@ function main(): void {
     if (activeGame instanceof RefinerGame) {
       const phase = activeGame.snapshot().phase;
       if (phase === 'pick') return 'picker';
-      if (phase === 'jumping') return 'refiner-jump';
+      if (phase === 'pressing') return 'refiner-press';
       return 'refiner-carry';
     }
     return 'swing';
@@ -861,10 +865,10 @@ function main(): void {
     // The real-camera body jump is unaffected — it comes from
     // landmarks, not the key.
     if (key === 'w' && activeSource === mouse) mouse.setJumping(true);
-    // X (hold) is the mouse-sim legs-wide key (v3.1 integration):
-    // ankles spread to the star-jump width for testing star jumps in
-    // the refiner. Real ankles need no key — they just move.
-    if (key === 'x' && activeSource === mouse) mouse.setLegsWide(true);
+    // P (hold) is the mouse-sim forge-press key (v3.4): both wrists
+    // press the refiner's pedestal buttons. P, not F: F is the
+    // fullscreen toggle, and W/S/Q/E/A/D/X are already sim keys.
+    if (key === 'p' && activeSource === mouse) mouse.setPressing(true);
     if (key === 's' && activeSource === mouse) mouse.setDucking(true);
     if (key === 'm') btnMute.click();
     if (key === 'v') btnVideo.click();
@@ -881,7 +885,7 @@ function main(): void {
     if (key === 'q' && activeSource === mouse) mouse.setKeyArmAngled('left', false);
     if (key === 'e' && activeSource === mouse) mouse.setKeyArmAngled('right', false);
     if (key === 'w' && activeSource === mouse) mouse.setJumping(false);
-    if (key === 'x' && activeSource === mouse) mouse.setLegsWide(false);
+    if (key === 'p' && activeSource === mouse) mouse.setPressing(false);
     if (key === 's' && activeSource === mouse) mouse.setDucking(false);
   });
 

@@ -1,10 +1,10 @@
 /**
- * Refiner state machine (v3.1): the pure carry-and-jump loop, no
- * canvas, no DOM, no landmarks. It reads a tiny hand input (are both
- * hands together? where is their midpoint, in canvas space? did a
- * star jump just fire?) plus a stock adapter, so it is unit-testable
- * with synthetic inputs and runs unchanged on the real tracker, the
- * mouse simulator, and replay fixtures.
+ * Refiner state machine (v3.1, press v3.4): the pure carry-and-press
+ * loop, no canvas, no DOM, no landmarks. It reads a tiny hand input
+ * (are both hands together? where is their midpoint, in canvas space?
+ * did a pedestal press just fire?) plus a stock adapter, so it is
+ * unit-testable with synthetic inputs and runs unchanged on the real
+ * tracker, the mouse simulator, and replay fixtures.
  *
  * THE LOOP (Brandon's design, Nov 4, 2026):
  * - pick: choose a recipe (gated by Refining level + owned ore).
@@ -17,14 +17,14 @@
  * - carry the ore to the hopper on the other side: the ore unsticks
  *   and drops loose into the hopper. The hopper shows its fill (1/2,
  *   2/2) for the recipe's input quantity (2 ore).
- * - jumping: once the hopper holds the full input quantity, 3 star
- *   jumps complete the batch -> 1 refined material + XP into
- *   inventory. The player can keep carrying (if they own more ore)
- *   or leave to the hub.
+ * - pressing: once the hopper holds the full input quantity, 3
+ *   pedestal presses complete the batch -> 1 refined material + XP
+ *   into inventory. The player can keep carrying (if they own more
+ *   ore) or leave to the hub.
  * - Leaving mid-batch ABANDONS it: the carried ore and any ore in
  *   the hopper return to inventory. That is the simplest honest rule
  *   — nothing is ever lost to a pause — and `stop()` / `leave()`
- *   apply it. The batch is only spent when the star jumps complete.
+ *   apply it. The batch is only spent when the presses complete.
  *
  * Failure -> Slag is NOT built: the active refiner always succeeds.
  *
@@ -62,16 +62,16 @@ export interface RefinerHandInput {
   /** Midpoint of the two wrists, canvas space. */
   handX: number;
   handY: number;
-  /** A star jump fired on this step (from `StarJumpDetector`). */
-  starJump: boolean;
+  /** A pedestal press fired on this step (from `PressDetector`). */
+  press: boolean;
 }
 
-export type RefinerPhase = 'pick' | 'carrying' | 'jumping' | 'done';
+export type RefinerPhase = 'pick' | 'carrying' | 'pressing' | 'done';
 
 export type RefinerEventKind =
   | 'grabbed'
   | 'dropped'
-  | 'star-jump'
+  | 'press'
   | 'batch-complete';
 
 /** What happened on this step (null = nothing). */
@@ -93,8 +93,8 @@ export interface RefinerSnapshot {
   carrying: boolean;
   /** Ore in the hopper (0..inputQuantity). */
   hopperFill: number;
-  /** Star jumps done this batch (0..3). */
-  jumpsDone: number;
+  /** Pedestal presses done this batch (0..3). */
+  pressesDone: number;
   /** Batches completed this session. */
   batchesDone: number;
   /** Last event (null until the first). */
@@ -106,7 +106,7 @@ export interface RefinerSnapshot {
 const PICK_HINT = 'Pick a recipe to refine — tap a chip!';
 const CARRY_HINT =
   'Both hands over the pile, hold — then carry the ore to the hopper!';
-const JUMP_HINT = 'Hopper full! Do 3 star jumps — jump with arms and legs wide!';
+const PRESS_HINT = 'Hopper full! Press both buttons down — 3 presses to forge the bar!';
 
 export class RefinerMachine {
   private readonly stock: RefinerStock;
@@ -114,7 +114,7 @@ export class RefinerMachine {
   private phase: RefinerPhase = 'pick';
   private carrying = false;
   private hopperFill = 0;
-  private jumpsDone = 0;
+  private pressesDone = 0;
   private batchesDone = 0;
   private lastEvent: RefinerEvent | null = null;
   /** ms both hands have been over the pile continuously (grab dwell). */
@@ -157,7 +157,7 @@ export class RefinerMachine {
     this.phase = 'carrying';
     this.carrying = false;
     this.hopperFill = 0;
-    this.jumpsDone = 0;
+    this.pressesDone = 0;
     this.grabHeldSinceMs = null;
     return true;
   }
@@ -189,8 +189,8 @@ export class RefinerMachine {
     const hint =
       this.phase === 'pick'
         ? PICK_HINT
-        : this.phase === 'jumping'
-          ? JUMP_HINT
+        : this.phase === 'pressing'
+          ? PRESS_HINT
           : this.carrying
             ? 'Carry it to the hopper on the other side!'
             : CARRY_HINT;
@@ -205,7 +205,7 @@ export class RefinerMachine {
           : this.stock.owned(this.recipe.inputItemId),
       carrying: this.carrying,
       hopperFill: this.hopperFill,
-      jumpsDone: this.jumpsDone,
+      pressesDone: this.pressesDone,
       batchesDone: this.batchesDone,
       lastEvent: this.lastEvent,
       hint,
@@ -229,15 +229,15 @@ export class RefinerMachine {
       return null;
     }
 
-    if (this.phase === 'jumping') {
-      if (input.starJump) {
-        this.jumpsDone += 1;
+    if (this.phase === 'pressing') {
+      if (input.press) {
+        this.pressesDone += 1;
         const event: RefinerEvent = {
-          kind: 'star-jump',
-          message: `Star jump ${this.jumpsDone}/${REFINER.starJumpsPerBatch}!`,
+          kind: 'press',
+          message: `Press ${this.pressesDone}/${REFINER.pressesPerBatch}!`,
         };
         this.lastEvent = event;
-        if (this.jumpsDone >= REFINER.starJumpsPerBatch) {
+        if (this.pressesDone >= REFINER.pressesPerBatch) {
           this.completeBatch(nowMs);
           // completeBatch replaces lastEvent with batch-complete.
           return this.lastEvent;
@@ -263,7 +263,7 @@ export class RefinerMachine {
     nowMs: number,
   ): RefinerEvent | null {
     if (this.recipe === null) return null;
-    // No grabbing while the hopper is already full — the jumps come first.
+    // No grabbing while the hopper is already full — the presses come first.
     if (this.hopperFill >= this.recipe.inputQuantity) return null;
     const overPile =
       input.handsTogether &&
@@ -313,19 +313,19 @@ export class RefinerMachine {
     };
     this.lastEvent = event;
     if (this.hopperFill >= this.recipe.inputQuantity) {
-      this.phase = 'jumping';
-      this.jumpsDone = 0;
+      this.phase = 'pressing';
+      this.pressesDone = 0;
     }
     return event;
   }
 
-  /** 3 star jumps done: pay out the output + XP, reset for the next batch. */
+  /** 3 presses done: pay out the output + XP, reset for the next batch. */
   private completeBatch(_nowMs: number): void {
     if (this.recipe === null) return;
     this.stock.give(this.recipe.outputItemId, this.recipe.outputQuantity);
     this.batchesDone += 1;
     this.hopperFill = 0;
-    this.jumpsDone = 0;
+    this.pressesDone = 0;
     this.phase = 'done';
     this.lastEvent = {
       kind: 'batch-complete',
@@ -344,7 +344,7 @@ export class RefinerMachine {
     }
     this.carrying = false;
     this.hopperFill = 0;
-    this.jumpsDone = 0;
+    this.pressesDone = 0;
     this.grabHeldSinceMs = null;
   }
 }

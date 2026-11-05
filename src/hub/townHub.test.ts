@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { inventory, InventoryStore } from '../core/inventory';
+import { VERSION, versionLabel } from '../core/version';
 import type { StorageLike } from '../core/save';
 import {
   bixSellPrice,
@@ -423,6 +424,21 @@ describe('TownHub', () => {
     expect(rec.texts.some((t) => t.includes('Combat'))).toBe(true);
     expect(rec.texts.some((t) => t.includes('coming soon'))).toBe(true);
     expect(rec.texts.some((t) => t.includes('Lumberjack'))).toBe(false);
+  });
+
+  it('draws the build version top-left, matching package.json (v3.4)', () => {
+    const { hub } = setup();
+    const rec = recordingContext();
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    expect(rec.texts).toContain(versionLabel());
+    expect(rec.texts).toContain(`RuneSweat v${VERSION}`);
+    // Top-left corner (12, 12) — clear of the centred header and
+    // the moon (top right).
+    const label = rec.calls.find(
+      (c) => c.method === 'fillText' && c.args[0] === versionLabel(),
+    );
+    expect(label?.args.slice(1)).toEqual([12, 12]);
   });
 
   it('no skyline window overlaps any bottom button rect (v3.3)', () => {

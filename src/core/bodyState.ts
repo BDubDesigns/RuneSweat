@@ -152,8 +152,10 @@ export interface BodyState {
    * Ankle-to-ankle distance as a fraction of torso length (raw, not
    * smoothed — ankles are stable when standing and the spread in a
    * jumping jack is large, so no filter lag is wanted). Standing reads
-   * ~0.59 (hip width); a jumping jack lands ~1.0-1.4. Feeds the
-   * star-jump detector (`core/starJump.ts`) only. 0 when no body.
+   * ~0.59 (hip width); a jumping jack lands ~1.0-1.4. No detector
+   * reads it since v3.4 (the star-jump detector was replaced by the
+   * pedestal press, which needs wrists, not ankles); kept as tracker
+   * output for the debug HUD. 0 when no body.
    */
   ankleSpreadTorsoFrac?: number;
   /** The standing hip-mid y this frame's jump/duck is measured against. */

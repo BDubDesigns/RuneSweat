@@ -61,6 +61,7 @@
  */
 
 import { BIX, RENDER } from '../core/config';
+import { versionLabel } from '../core/version';
 import { assetUrl } from '../core/assetUrl';
 import {
   inventory,
@@ -642,6 +643,24 @@ export class TownHub {
     this.drawTownBackdrop(ctx, width, height);
     if (this.screen === 'shop') this.renderShop(ctx, width, height);
     else this.renderMain(ctx, width, height);
+    // Build version, both screens: top-left corner, small and dim —
+    // clear of the centred header and the moon (top right).
+    this.drawVersionLabel(ctx);
+    ctx.restore();
+  }
+
+  /**
+   * Version label (v3.4): the build, at a glance, without opening
+   * any menu. Same single source as the select screen
+   * (`core/version.ts` <- `package.json`).
+   */
+  private drawVersionLabel(ctx: CanvasRenderingContext2D): void {
+    ctx.save();
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = `13px ${RENDER.gameFont}`;
+    ctx.fillStyle = '#8a8aa0';
+    ctx.fillText(versionLabel(), 12, 12);
     ctx.restore();
   }
 

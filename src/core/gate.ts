@@ -92,10 +92,10 @@ export interface GateOptions {
  * `config.ts`. Shoulders + hips are required by every activity (the
  * frame anchor); `requireKnees` is the per-activity switch — the
  * swing needs the knees as a reference, the refiner does not. The
- * wrists (refiner carry) and ankles (star jumps) are the games'
- * own inputs — the grab logic needs both wrists together, the
- * star-jump detector needs the ankle spread — so the gate does not
- * also check them: `BodyState` does not carry wrist / ankle
+ * wrists (refiner carry) and buttons (pedestal presses) are the
+ * games' own inputs — the grab logic needs both wrists together, the
+ * press detector needs the wrists in the button zones — so the gate
+ * does not also check them: `BodyState` does not carry wrist
  * visibility, and a gate that pretended to check them would be lying.
  */
 export interface GateRequirements {

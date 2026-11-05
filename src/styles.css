@@ -124,6 +124,12 @@ body {
   margin: 0;
 }
 
+.version {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 12px 0 0;
+}
+
 .stage-wrap {
   position: relative;
   width: 100%;

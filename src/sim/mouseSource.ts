@@ -16,10 +16,16 @@
  * - `W` (hold): jump. `S` (hold): duck. (v3.1: Space used to be jump;
  *   Space is now the pause toggle in main.ts, so jump moved to W. The
  *   real-camera body jump is unaffected — it comes from landmarks.)
- * - `X` (hold): legs wide — ankles jump out to the star-jump spread,
- *   for testing star jumps in the refiner (v3.1 integration). A plain
- *   jump keeps the ankles at hip width and does NOT count as a star
- *   jump, by design.
+ * - `P` (hold): press both forge buttons — for the refiner (v3.4).
+ *   Both wrists animate out to the pedestal buttons (hip-mid ±0.8
+ *   torso, at the hip line) and push down to hip line + 0.12 torso
+ *   while held; release returns them to rest. The press is a
+ *   deliberate downward push: the wrists travel down into the button
+ *   zones, they do not teleport into them. `X` (legs wide) is gone
+ *   with the star jumps — the sim can now play a full refiner batch.
+ *   `W` jump stays as a general sim capability (it still drives
+ *   `BodyState.jumping`, shown in the debug HUD) — it is just no
+ *   longer the refiner's input.
  *
  * Two-handed clasp (Swing Lab v2): when BOTH arms are raised straight up
  * at the same time (A+D, or both mouse buttons), the hands grip one
@@ -56,6 +62,20 @@ import { clamp, lerp } from '../render/stage';
  * judgment. */
 const CLASP_RELEASE_GRACE_MS = 500;
 
+/**
+ * Press animation time (ms, v3.4): `P` held drives `pressT` 0 -> 1.
+ * First half: wrists travel out to the buttons at the hip line;
+ * second half: they push down to hip line + 0.12 torso. The push
+ * half is ~120 ms, so the downward leg runs at ~1 torso length/s
+ * raw — a deliberate push the press detector can read as downward
+ * motion, not a teleport into the zones.
+ */
+const PRESS_ANIM_MS = 240;
+/** Button centres sit this far from hip-mid, in torso lengths. */
+const PRESS_BUTTON_OFFSET_TORSO_FRAC = 0.8;
+/** Pressed wrists sit this far below the hip line, in torso lengths. */
+const PRESS_DEPTH_TORSO_FRAC = 0.12;
+
 interface ArmSim {
   /** 0 = down, 1 = fully raised. Animates toward `target`. */
   raiseT: number;
@@ -89,8 +109,10 @@ export class MouseSource implements PoseFrameSource {
   private claspReleaseAtMs: number | null = null;
   private jumping = false;
   private ducking = false;
-  /** X held: legs wide (ankles out to the star-jump spread). */
-  private legsWide = false;
+  /** P held: both wrists press the forge buttons (v3.4, refiner). */
+  private pressing = false;
+  /** 0 = rest, 1 = fully pressed. Animates toward `pressing ? 1 : 0`. */
+  private pressT = 0;
   private lastNowMs: number | null = null;
 
   public start(nowMs: number): void {
@@ -145,9 +167,9 @@ export class MouseSource implements PoseFrameSource {
     this.ducking = ducking;
   }
 
-  /** X (hold): spread the ankles to the star-jump width. */
-  public setLegsWide(wide: boolean): void {
-    this.legsWide = wide;
+  /** P (hold): press both forge buttons (v3.4, refiner). */
+  public setPressing(pressing: boolean): void {
+    this.pressing = pressing;
   }
 
   private advanceArm(arm: ArmSim, dtMs: number): void {
@@ -216,49 +238,91 @@ export class MouseSource implements PoseFrameSource {
         ? { x: torsoX - halfShoulder, y: shoulderY }
         : { x: torsoX + halfShoulder, y: shoulderY };
 
+    // Press animation: P held drives pressT 0 -> 1 over PRESS_ANIM_MS;
+    // release drives it back to 0 at the same rate.
+    const pressTarget = this.pressing ? 1 : 0;
+    const pressStep = dtMs / PRESS_ANIM_MS;
+    if (this.pressT < pressTarget) {
+      this.pressT = Math.min(pressTarget, this.pressT + pressStep);
+    } else if (this.pressT > pressTarget) {
+      this.pressT = Math.max(pressTarget, this.pressT - pressStep);
+    }
+
     const armPoints = (side: 'left' | 'right'): {
       elbow: NormalizedLandmark;
       wrist: NormalizedLandmark;
     } => {
       const shoulder = shoulderFor(side);
       const arm = side === 'left' ? this.leftArm : this.rightArm;
+      let wrist: NormalizedLandmark;
+      let elbow: NormalizedLandmark;
       if (this.clasped) {
         // One handle on the midline: the wrist travels the chop arc
         // from overhead (raiseT 1) to waist height (raiseT 0), staying
         // at the body's center the whole way. Each arm follows its own
         // raiseT, so releasing one hand early lets that wrist drop while
         // the other stays up — the grip genuinely breaks.
-        const wrist = lm(
+        wrist = lm(
           torsoX,
           shoulderY - (2 * arm.raiseT - 1) * SIM.armLength,
         );
-        const elbow = lm(
+        elbow = lm(
           shoulder.x + (wrist.x - shoulder.x) * 0.55,
           shoulder.y + (wrist.y - shoulder.y) * 0.55,
         );
-        return { elbow, wrist };
+      } else {
+        const raised = arm.raiseT;
+        // Down direction: arm hangs at the side. Up direction: `angleDeg`
+        // from straight up. Interpolate by raiseT. Down is ~170° from up
+        // (not 10°): the wrist must hang BELOW the shoulder when down.
+        const downAngleRad =
+          side === 'left' ? -Math.PI * 0.94 : Math.PI * 0.94;
+        const upAngleRad = (arm.angleDeg * Math.PI) / 180;
+        // Blend the direction angle from "hanging" to "raised".
+        const angleRad = lerp(downAngleRad, upAngleRad, raised);
+        // Direction vector in video space (y down): angle measured from
+        // straight up, positive toward video-right.
+        const dirX = Math.sin(angleRad);
+        const dirY = -Math.cos(angleRad);
+        elbow = lm(
+          shoulder.x + dirX * SIM.armLength * 0.55,
+          shoulder.y + dirY * SIM.armLength * 0.55,
+        );
+        wrist = lm(
+          shoulder.x + dirX * SIM.armLength,
+          shoulder.y + dirY * SIM.armLength,
+        );
       }
-      const raised = arm.raiseT;
-      // Down direction: arm hangs at the side. Up direction: `angleDeg`
-      // from straight up. Interpolate by raiseT. Down is ~170° from up
-      // (not 10°): the wrist must hang BELOW the shoulder when down.
-      const downAngleRad =
-        side === 'left' ? -Math.PI * 0.94 : Math.PI * 0.94;
-      const upAngleRad = (arm.angleDeg * Math.PI) / 180;
-      // Blend the direction angle from "hanging" to "raised".
-      const angleRad = lerp(downAngleRad, upAngleRad, raised);
-      // Direction vector in video space (y down): angle measured from
-      // straight up, positive toward video-right.
-      const dirX = Math.sin(angleRad);
-      const dirY = -Math.cos(angleRad);
-      const elbow = lm(
-        shoulder.x + dirX * SIM.armLength * 0.55,
-        shoulder.y + dirY * SIM.armLength * 0.55,
-      );
-      const wrist = lm(
-        shoulder.x + dirX * SIM.armLength,
-        shoulder.y + dirY * SIM.armLength,
-      );
+      if (this.pressT > 0) {
+        // Forge press (v3.4): both wrists leave wherever they were and
+        // press the pedestal buttons — the same numbers as the
+        // detector's zones (core/pressDetector): centres at hip-mid
+        // ±0.8 torso, zone top at hip − 0.15 torso, pressed depth
+        // hip + 0.12 torso. First half of pressT: travel out to the
+        // buttons at the hip line (blended from the current wrist, so
+        // no teleport); second half: the deliberate downward push
+        // into the pressed position. On release pressT runs back
+        // down and the wrists return to rest the same way.
+        const dir = side === 'left' ? -1 : 1;
+        const buttonX = torsoX + dir * PRESS_BUTTON_OFFSET_TORSO_FRAC * SIM.torsoLength;
+        const pressedY = hipY + PRESS_DEPTH_TORSO_FRAC * SIM.torsoLength;
+        let px: number;
+        let py: number;
+        if (this.pressT <= 0.5) {
+          const t = this.pressT / 0.5;
+          px = lerp(wrist.x, buttonX, t);
+          py = lerp(wrist.y, hipY, t);
+        } else {
+          const t = (this.pressT - 0.5) / 0.5;
+          px = buttonX;
+          py = lerp(hipY, pressedY, t);
+        }
+        wrist = lm(px, py);
+        elbow = lm(
+          shoulder.x + (px - shoulder.x) * 0.55,
+          shoulder.y + (py - shoulder.y) * 0.55,
+        );
+      }
       return { elbow, wrist };
     };
 
@@ -267,13 +331,9 @@ export class MouseSource implements PoseFrameSource {
     const legBend = this.ducking ? 0.25 : 0;
     const kneeY = hipY + SIM.legLength * 0.5;
     const ankleY = hipY + SIM.legLength;
-    // Legs-wide (X hold, v3.1): ankles jump out to the star-jump spread
-    // while the knees stay at hip width — the star-jump detector reads
-    // ankles only, so the knees need not move. Standing ankles read
-    // ~0.59 torso; legs-wide reads SIM.legsWideAnkleSpreadTorsoFrac.
-    const ankleHalf = this.legsWide
-      ? (SIM.legsWideAnkleSpreadTorsoFrac * SIM.torsoLength) / 2
-      : hipHalf;
+    // Ankles stay at hip width: the legs-wide input is gone with the
+    // star jumps (v3.4) — nothing in the game reads ankle spread now.
+    const ankleHalf = hipHalf;
 
     const landmarks: NormalizedLandmark[] = new Array<NormalizedLandmark>(33);
     const nose = lm(torsoX, shoulderY - 0.09);

@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { inventory } from './core/inventory';
+import { VERSION } from './core/version';
 
 /**
  * Fullscreen toggle (Swing Lab v3), tested against `main.ts` with a stub
@@ -178,6 +180,12 @@ describe('fullscreen toggle wiring', () => {
     expect(btn?.textContent).toBe('🏠 Town');
   });
 
+  it('shows the build version on the select screen, matching package.json (v3.4)', () => {
+    const el = elements.get('app-version');
+    expect(el).toBeDefined();
+    expect(el?.textContent).toBe(`RuneSweat v${VERSION}`);
+  });
+
   it('clicking requests fullscreen on the stage section', async () => {
     const btn = elements.get('btn-fullscreen');
     const stage = elements.get('stage-section');
@@ -285,15 +293,15 @@ describe('fullscreen toggle wiring', () => {
     (globalThis as unknown as Record<string, unknown>).cancelAnimationFrame =
       (): void => {};
 
-    // Play without a camera, then pick Swing Lab (1st game card:
-    // Swing Lab; Lumberjack is the disabled 2nd card).
+    // Play without a camera, then pick Swing Lab (the only game card:
+    // Lumberjack was removed from the registry in v3.4).
     const btnSim = elements.get('btn-sim');
     if (btnSim === undefined) throw new Error('btn-sim missing');
     btnSim.click();
     const cards = createdElements.filter((el) =>
       el.className.startsWith('game-card'),
     );
-    expect(cards).toHaveLength(2);
+    expect(cards).toHaveLength(1);
     cards[0]?.click();
 
     // ~1.5 s of frames: the gate opens on the sim body and the game
@@ -419,6 +427,62 @@ describe('fullscreen toggle wiring', () => {
     driveFrames(3);
     expect(hudText()).toContain('Refining Lv');
     expect(pauseLabel()).toBe('🏠 Town');
+  });
+
+  it('refiner press phase: sim grab x2, drop x2, 3 P presses complete a batch (v3.4)', () => {
+    // State carried from the previous test: the refiner is active,
+    // town closed, picker showing. The full batch through the real
+    // wiring: DOM taps + keys + pointer moves, no direct game calls.
+    inventory.reset();
+    inventory.add('ferrite-shale', 20);
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+
+    // Picker: tap the Refined Ferrite card twice (select, then start).
+    dispatchCanvasTap(480, 188);
+    dispatchCanvasTap(480, 188);
+    driveFrames(2);
+    expect(hudText()).toContain('Recipe: Refined Ferrite');
+
+    // Grab: A+D clasp, release, move over the pile, dwell; drop:
+    // move over the hopper. Twice.
+    const grabAndDrop = (): void => {
+      dispatchDocumentEvent('keydown', { key: 'a', repeat: false });
+      dispatchDocumentEvent('keydown', { key: 'd', repeat: false });
+      driveFrames(10);
+      dispatchDocumentEvent('keyup', { key: 'a' });
+      dispatchDocumentEvent('keyup', { key: 'd' });
+      dispatchCanvasPointerMove(288, 319);
+      driveFrames(40);
+      dispatchCanvasPointerMove(672, 319);
+      driveFrames(25);
+    };
+    grabAndDrop();
+    expect(hudText()).toContain('Hopper 1/2');
+    grabAndDrop();
+    expect(hudText()).toContain('Hopper 2/2');
+    // Pedestals slide in over 400 ms before the detector runs.
+    driveFrames(30);
+
+    // Three P presses, hands back to the centre (A+D clasp) between
+    // them so the detector re-arms (see refiner.test.ts).
+    for (let i = 0; i < 3; i++) {
+      dispatchDocumentEvent('keydown', { key: 'p', repeat: false });
+      driveFrames(90);
+      dispatchDocumentEvent('keyup', { key: 'p' });
+      if (i < 2) {
+        expect(hudText()).toContain(`🔨 ${i + 1}/3`);
+      }
+      dispatchDocumentEvent('keydown', { key: 'a', repeat: false });
+      dispatchDocumentEvent('keydown', { key: 'd', repeat: false });
+      driveFrames(18);
+      dispatchDocumentEvent('keyup', { key: 'a' });
+      dispatchDocumentEvent('keyup', { key: 'd' });
+      driveFrames(42);
+    }
+    expect(inventory.count('refined-ferrite')).toBe(1);
+    expect(inventory.xp('refining')).toBe(15);
+    expect(hudText()).toContain('🔨 0/3');
   });
 });
 });

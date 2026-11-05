@@ -18,9 +18,16 @@
  *   to the hands. One ore at a time.
  * - Carry both hands to the hopper on the RIGHT -> the ore unsticks
  *   and drops loose into the hopper. Hopper fill shows 1/2, 2/2.
- * - Process: once the hopper holds the full input (2 ore), 3 star
- *   jumps complete the batch -> 1 refined material + XP. Progress
- *   shows 1/3, 2/3, 3/3 on screen.
+ * - Process: once the hopper holds the full input (2 ore), 3 pedestal
+ *   presses complete the batch -> 1 refined material + XP. Progress
+ *   shows 1/3, 2/3, 3/3 on screen. The press replaced the jumping
+ *   step (v3.4): Brandon is too tall for his room to jump without his
+ *   head/hands leaving the frame, so the jump never counted (0/3 on
+ *   a textbook star shape, 13 s clip). Two pedestals slide up either
+ *   side of the avatar; both wrists on the buttons + a downward push,
+ *   held 300 ms, counts one press. No vertical space, no legs, hands
+ *   stay separated (which also dodges the handedness-latch flip that
+ *   meeting hands overhead used to trigger).
  * - After a batch, keep carrying (if you own more ore) or leave to
  *   the hub. Leaving mid-batch ABANDONS it and the carried + hopper
  *   ore returns to inventory — nothing is ever lost to a pause.
@@ -29,27 +36,24 @@
  *
  * MOUSE-SIM (see README / PLAN for the full mapping): pointer steers
  * the torso, `A`+`D` clasps both hands to one point — move the clasp
- * over the pile to grab, over to the hopper to drop. Star jumps need
- * `W` (jump) + `Q`+`E` (arms wide) — BUT the current sim cannot
- * spread its ankles, so a sim star jump can never satisfy the
- * detector's legs-apart condition (see `core/starJump.ts`). The
- * coordinator needs a sim leg-spread input before the full slice is
- * mouse-playable; the grab/carry/drop half plays in the sim today.
+ * over the pile to grab, over to the hopper to drop. Presses need `P`
+ * (hold): both wrists animate onto the pedestal buttons and push
+ * down. The full batch is sim-playable (see `refiner.test.ts`).
  *
  * The game owns only its simulation + canvas drawing + HUD string.
- * It reads `BodyState` only (via the machine + the star-jump
- * detector) and the shared `inventory` store — no constructor
- * changes: `new RefinerGame(sfx)`. The coordinator wires leaving:
+ * It reads `BodyState` only (via the machine + the press detector)
+ * and the shared `inventory` store — no constructor changes:
+ * `new RefinerGame(sfx)`. The coordinator wires leaving:
  * set `game.onLeaveToHub = () => ...` (called when the player taps
  * "Leave to town"); the game itself abandons the batch first.
  */
 
-import { RENDER, REFINER, STAGE, SWING } from '../../core/config';
+import { PRESS, REFINER, RENDER, SIM, STAGE, SWING } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
 import { assetUrl } from '../../core/assetUrl';
 import { paintButton } from '../../hub/townHub';
 import type { BodyState } from '../../core/bodyState';
-import { StarJumpDetector } from '../../core/starJump';
+import { PressDetector, pressButtonZones } from '../../core/pressDetector';
 import { inventory } from '../../core/inventory';
 import { toCanvas } from '../../render/stage';
 import type { NormalizedLandmark } from '../../tracking/poseTypes';
@@ -194,11 +198,29 @@ function loadImage(relativePath: string): LoadedImage | null {
 
 /** Read-only snapshot of the live state, for the debug HUD and tests. */
 export interface RefinerGameSnapshot extends RefinerSnapshot {
-  /** Star jumps done this batch (mirrors the machine). */
-  starJumps: number;
-  /** Current star-jump shape progress 0..1 (live body feedback). */
-  starShapeProgress: number;
+  /** Pedestal presses done this batch (mirrors the machine). */
+  presses: number;
+  /** Current press progress 0..1 (live body feedback). */
+  pressProgress: number;
+  /** Pedestal slide 0..1 (0 = down / gone, 1 = fully up). */
+  pedestalSlideT: number;
 }
+
+/**
+ * Pedestal colours (v3.4): dark steel columns, gold buttons that
+ * darken while pressed. Exported so tests can find the pedestals in
+ * a recording context by fill style.
+ */
+export const PEDESTAL_STYLE = {
+  column: '#3a3f4a',
+  columnEdge: '#23262e',
+  button: '#ffd166',
+  buttonEdge: '#b8860b',
+  // Deeper gold than the buttons, on purpose: tests (and eyes)
+  // tell the forging bar apart from the buttons by colour alone.
+  bar: '#e8a93d',
+  barEdge: '#b8860b',
+} as const;
 
 export class RefinerGame implements Game {
   public readonly id = 'refiner';
@@ -219,11 +241,27 @@ export class RefinerGame implements Game {
     take: (id, n) => inventory.remove(id, n),
     give: (id, n) => inventory.add(id, n),
   });
-  private readonly starJump = new StarJumpDetector();
+  private readonly pressDetector = new PressDetector();
 
   private lastWidth: number = STAGE.width;
   private lastHeight: number = STAGE.height;
-  private lastShapeProgress = 0;
+  private lastPressProgress = 0;
+  /** ms clock of the last update/render (drives the pedestal slide). */
+  private lastNowMs = 0;
+  /**
+   * Pedestal slide state (v3.4): slide-in starts the frame the
+   * machine enters 'pressing'; slide-out starts the frame it leaves
+   * (batch complete or leave). Both run over `PRESS.slideMs`.
+   */
+  private pedestalInStartMs: number | null = null;
+  private pedestalOutStartMs: number | null = null;
+  /**
+   * Last seen hip-mid + torso length: the pedestals render from the
+   * live body when present, from these when it drops mid-press.
+   */
+  private lastHipMidX: number = 0.5;
+  private lastHipMidY: number = SIM.standingHipY;
+  private lastTorsoLength: number = SIM.torsoLength;
   private leaveRequested = false;
   /**
    * Recipe-picker cards + leave chip, recomputed every render.
@@ -294,13 +332,13 @@ export class RefinerGame implements Game {
 
   /** Back to the recipe picker (abandons the live batch). */
   public backToPicker(nowMs: number): void {
-    void nowMs;
     const prev = this.machine.currentRecipe?.id ?? null;
     this.machine.backToPicker();
     // The last recipe stays selected, so one tap re-starts it.
     this.selectedId = prev;
     this.announcementText = null;
     this.announcementUntilMs = 0;
+    this.trackPedestals('pick', nowMs);
   }
 
   /** True once the player has asked to leave (coordinator polls this). */
@@ -319,13 +357,13 @@ export class RefinerGame implements Game {
    * nothing — its lock reason is printed on the card itself. A tap on
    * "Leave to town" abandons the batch and fires `onLeaveToHub`.
    */
-  public pointerDownAt(x: number, y: number, _nowMs: number): boolean {
+  public pointerDownAt(x: number, y: number, nowMs: number): boolean {
     for (const card of this.cardRects) {
       if (x < card.x || x > card.x + card.w || y < card.y || y > card.y + card.h) {
         continue;
       }
       if (card.action === 'leave') {
-        this.requestLeave();
+        this.requestLeave(nowMs);
         return true;
       }
       if (card.action.startsWith('recipe:')) {
@@ -351,7 +389,10 @@ export class RefinerGame implements Game {
   public start(): void {
     this.machine.setRefiningLevel(inventory.level('refining'));
     this.machine.leave();
-    this.starJump.reset();
+    this.pressDetector.reset();
+    this.pedestalInStartMs = null;
+    this.pedestalOutStartMs = null;
+    this.lastPressProgress = 0;
     this.paused = false;
     this.leaveRequested = false;
     this.selectedId = null;
@@ -361,6 +402,7 @@ export class RefinerGame implements Game {
 
   public stop(): void {
     this.machine.leave();
+    this.trackPedestals('pick', this.lastNowMs);
     this.paused = true;
     this.detachPointerListener();
   }
@@ -385,6 +427,7 @@ export class RefinerGame implements Game {
   ): void {
     if (this.paused) return;
     void dtMs;
+    this.lastNowMs = nowMs;
     this.machine.setRefiningLevel(inventory.level('refining'));
 
     const width = this.lastWidth;
@@ -392,8 +435,48 @@ export class RefinerGame implements Game {
     const pile = pileZoneForStage(width, height);
     const hopper = hopperZoneForStage(width, height);
 
-    const jumpEvent = this.starJump.update(body, nowMs);
-    this.lastShapeProgress = this.starJump.shape(body).progress;
+    // Remember the body's hip-mid + torso: the pedestals render
+    // from the live body when present, from these when it drops.
+    // BodyState carries hip-mid directly as torsoX/torsoY (the
+    // smoothed hip-midpoint) — there are no per-hip landmark fields.
+    if (body !== null && body.present && body.torsoLength > 0) {
+      this.lastHipMidX = body.torsoX;
+      this.lastHipMidY = body.torsoY;
+      this.lastTorsoLength = body.torsoLength;
+    }
+
+    // Pedestal press (v3.4): the detector only runs while the
+    // machine is in 'pressing' AND the pedestals are fully up — a
+    // press must never count while they are still sliding in.
+    let pressEvent: { kind: 'press'; atMs: number } | null = null;
+    this.lastPressProgress = 0;
+    if (
+      this.machine.snapshot().phase === 'pressing' &&
+      body !== null &&
+      body.present &&
+      body.torsoLength > 0 &&
+      this.pedestalSlideT(nowMs) >= 1
+    ) {
+      const left = { x: body.leftWristX, y: body.leftWristY };
+      const right = { x: body.rightWristX, y: body.rightWristY };
+      pressEvent = this.pressDetector.update(
+        left,
+        right,
+        body.torsoX,
+        body.torsoY,
+        body.torsoLength,
+        nowMs,
+      );
+      // Progress is a pure read — update first, then this.
+      this.lastPressProgress = this.pressDetector.progress(
+        left,
+        right,
+        body.torsoX,
+        body.torsoY,
+        body.torsoLength,
+        nowMs,
+      );
+    }
 
     let handX = width / 2;
     let handY = height / 2;
@@ -425,13 +508,14 @@ export class RefinerGame implements Game {
         handsTogether,
         handX,
         handY,
-        starJump: jumpEvent !== null,
+        press: pressEvent !== null,
       },
       pile,
       hopper,
       nowMs,
     );
     if (event !== null) this.applyEvent(event, nowMs);
+    this.trackPedestals(this.machine.snapshot().phase, nowMs);
   }
 
   public render(
@@ -444,8 +528,10 @@ export class RefinerGame implements Game {
     const height = ctx.canvas.height;
     this.lastWidth = width;
     this.lastHeight = height;
+    this.lastNowMs = nowMs;
     this.attachPointerListener(ctx.canvas);
     const snap = this.machine.snapshot();
+    this.trackPedestals(snap.phase, nowMs);
     const pile = pileZoneForStage(width, height);
     const hopper = hopperZoneForStage(width, height);
 
@@ -459,6 +545,9 @@ export class RefinerGame implements Game {
     this.drawPile(ctx, pile, snap, nowMs);
     this.drawHopper(ctx, hopper, snap, nowMs);
     this.drawCarriedOre(ctx, body, width, height, snap);
+    // Pedestals after the pile/hopper, before the Leave chip — they
+    // never cover the Leave control.
+    this.drawPedestals(ctx, width, height, body, nowMs);
     this.drawProgress(ctx, snap, width, height, nowMs);
     this.drawLeaveChip(ctx, width, height);
     // No "step into frame" text here: the gate owns that message (a
@@ -477,7 +566,7 @@ export class RefinerGame implements Game {
       `<span>💰 ${inventory.credits} cr</span> &nbsp; ` +
       `<span>Recipe: ${recipe}</span> &nbsp; ` +
       `<span>Hopper ${snap.hopperFill}/${REFINER.hopperCapacity}</span> &nbsp; ` +
-      `<span>⭐ ${snap.jumpsDone}/${REFINER.starJumpsPerBatch}</span> &nbsp; ` +
+      `<span>🔨 ${snap.pressesDone}/${REFINER.pressesPerBatch}</span> &nbsp; ` +
       `<span>${snap.hint}</span>`
     );
   }
@@ -487,15 +576,18 @@ export class RefinerGame implements Game {
     const snap = this.machine.snapshot();
     return {
       ...snap,
-      starJumps: snap.jumpsDone,
-      starShapeProgress: this.lastShapeProgress,
+      presses: snap.pressesDone,
+      pressProgress: this.lastPressProgress,
+      pedestalSlideT: this.pedestalSlideT(this.lastNowMs),
     };
   }
 
   private applyEvent(event: RefinerEvent, nowMs: number): void {
     if (event.kind === 'dropped') this.sfx.reload();
     if (event.kind === 'grabbed') this.sfx.shoot();
-    if (event.kind === 'star-jump') this.sfx.feedback('good');
+    if (event.kind === 'press') {
+      this.sfx.feedback('good');
+    }
     if (event.kind === 'batch-complete') {
       const recipe = this.machine.currentRecipe;
       if (recipe !== null) {
@@ -512,10 +604,62 @@ export class RefinerGame implements Game {
     }
   }
 
-  private requestLeave(): void {
+  private requestLeave(nowMs: number): void {
     this.machine.leave();
+    this.lastNowMs = nowMs;
+    this.trackPedestals('pick', nowMs);
     this.leaveRequested = true;
     if (this.onLeaveToHub !== null) this.onLeaveToHub();
+  }
+
+  /**
+   * Pedestal slide state machine (v3.4). Entering 'pressing' starts
+   * the slide-in (and re-arms the detector, so a stale hold from a
+   * previous batch can never count); leaving 'pressing' starts the
+   * slide-out. Called from update() and render() — whichever runs
+   * first after the transition wins, and a repeated call is a no-op.
+   */
+  private trackPedestals(
+    phase: RefinerSnapshot['phase'],
+    nowMs: number,
+  ): void {
+    if (phase === 'pressing') {
+      if (this.pedestalInStartMs === null) {
+        this.pedestalInStartMs = nowMs;
+        this.pedestalOutStartMs = null;
+        this.pressDetector.reset();
+      }
+      return;
+    }
+    if (
+      this.pedestalInStartMs !== null &&
+      this.pedestalOutStartMs === null
+    ) {
+      this.pedestalOutStartMs = nowMs;
+    }
+  }
+
+  /**
+   * Pedestal slide 0..1 at `nowMs`: 0 = down / gone, 1 = fully up.
+   * Slides in over `PRESS.slideMs` from the in-start, out over the
+   * same from the out-start. Once the slide-out finishes the state
+   * resets, so the next batch slides in from scratch.
+   */
+  private pedestalSlideT(nowMs: number): number {
+    if (this.pedestalInStartMs === null) return 0;
+    if (this.pedestalOutStartMs !== null) {
+      const t = 1 - (nowMs - this.pedestalOutStartMs) / PRESS.slideMs;
+      if (t <= 0) {
+        this.pedestalInStartMs = null;
+        this.pedestalOutStartMs = null;
+        return 0;
+      }
+      return t;
+    }
+    return Math.min(
+      1,
+      Math.max(0, (nowMs - this.pedestalInStartMs) / PRESS.slideMs),
+    );
   }
 
   // ------------------------------------------------------------- drawing ---
@@ -750,6 +894,25 @@ export class RefinerGame implements Game {
         ctx.fill();
       }
     }
+    // Forging bar (v3.4): while pressing, the ore in the hopper is a
+    // gold bar that visibly squashes one step per press — full height
+    // at 0 presses, a third of it at 2. On the 3rd press the batch
+    // completes and the bar pops out (announcement, not drawn here).
+    if (snap.phase === 'pressing') {
+      const fullH = hopper.h * 0.3;
+      const barH = Math.max(
+        6,
+        fullH * (1 - snap.pressesDone / REFINER.pressesPerBatch),
+      );
+      const barW = hopper.w * 0.4;
+      const barX = hopper.x + (hopper.w - barW) / 2;
+      const barY = hopper.y + hopper.h * 0.97 - barH;
+      ctx.fillStyle = PEDESTAL_STYLE.bar;
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.strokeStyle = PEDESTAL_STYLE.barEdge;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(barX, barY, barW, barH);
+    }
     ctx.font = `700 22px ${RENDER.gameFont}`;
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
@@ -800,9 +963,94 @@ export class RefinerGame implements Game {
   }
 
   /**
-   * Title / phase banner ONLY (v3.2). The star progress lives in the
-   * HUD (⭐ n/3) — the canvas stars sat on the avatar's hat (t70) —
-   * and the star-jump instruction + last-event line duplicated the
+   * Pedestals (v3.4): two columns with a big button on top, at the
+   * detector's zones (`pressButtonZones`, normalized video space —
+   * converted to canvas with `toCanvas`, so the mirror applies).
+   * They slide up from below the stage over `PRESS.slideMs` when the
+   * hopper fills and back down on batch-complete / leave. The button
+   * sinks as the press hold progresses: `pressProgress` is 2/3 the
+   * moment both wrists are in their zones (2 of 3 progress parts)
+   * and 1 when the hold completes, so the sink runs from 0 at 2/3
+   * to full `PRESS.pressDepthTorsoFrac` at 1 — and stays down while
+   * the hands stay on the buttons after a counted press.
+   *
+   * The column is narrower than the button (60%): a post, not a wall,
+   * so it covers less of the pile/hopper behind it. The buttons sit
+   * at waist height where the hands naturally rest, so they overlap
+   * the pile/hopper edges on screen — the buttons draw after the
+   * pile/hopper, per the layering order, and only while pressing,
+   * when the pile is done being used for this batch.
+   */
+  private drawPedestals(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    body: BodyState | null,
+    nowMs: number,
+  ): void {
+    const slideT = this.pedestalSlideT(nowMs);
+    if (slideT <= 0) return;
+    const hipMidX =
+      body !== null && body.present ? body.torsoX : this.lastHipMidX;
+    const hipMidY =
+      body !== null && body.present ? body.torsoY : this.lastHipMidY;
+    const torsoLength =
+      body !== null && body.present && body.torsoLength > 0
+        ? body.torsoLength
+        : this.lastTorsoLength;
+    const zones = pressButtonZones(hipMidX, hipMidY, torsoLength);
+    // Button sink: 0 while the hands are off the buttons, full depth
+    // when the hold completes (pressProgress 1), held while the
+    // hands stay down after a counted press.
+    const sinkFrac = Math.min(
+      1,
+      Math.max(0, (this.lastPressProgress - 2 / 3) * 3),
+    );
+    const depressPx =
+      PRESS.pressDepthTorsoFrac * torsoLength * height * sinkFrac;
+    ctx.save();
+    for (const zone of [zones.left, zones.right]) {
+      // toCanvas mirrors x: the video-space left zone is the
+      // canvas-right button. Take min/max, not the raw corners.
+      const top = toCanvas(
+        { x: zone.x, y: zone.y, visibility: 1 },
+        width,
+        height,
+      );
+      const bottom = toCanvas(
+        { x: zone.x + zone.w, y: zone.y + zone.h, visibility: 1 },
+        width,
+        height,
+      );
+      const bx = Math.min(top.x, bottom.x);
+      const bw = Math.abs(bottom.x - top.x);
+      const by = top.y;
+      const bh = bottom.y - top.y;
+      // Slide: at slideT 0 the button top sits at the stage bottom
+      // (fully below the screen); at 1 it sits at its zone.
+      const dy = (1 - slideT) * (height - by);
+      const buttonY = by + dy + depressPx;
+      const columnW = bw * 0.6;
+      const columnX = bx + (bw - columnW) / 2;
+      const columnTop = buttonY + bh;
+      ctx.fillStyle = PEDESTAL_STYLE.column;
+      ctx.fillRect(columnX, columnTop, columnW, height - columnTop);
+      ctx.strokeStyle = PEDESTAL_STYLE.columnEdge;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(columnX, columnTop, columnW, height - columnTop);
+      ctx.fillStyle = PEDESTAL_STYLE.button;
+      ctx.fillRect(bx, buttonY, bw, bh);
+      ctx.strokeStyle = PEDESTAL_STYLE.buttonEdge;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(bx, buttonY, bw, bh);
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Title / phase banner ONLY (v3.2). The press progress lives in the
+   * HUD (🔨 n/3) — the old canvas progress sat on the avatar's hat
+   * (t70) — and the press instruction + last-event line duplicated the
    * HUD hint (t48: the same instruction three times). The one
    * exception is a batch-complete announcement, which replaces the
    * title in the same banner zone for a moment.

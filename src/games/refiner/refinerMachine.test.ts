@@ -34,7 +34,7 @@ function overPile(): RefinerHandInput {
     handsTogether: true,
     handX: PILE.x + PILE.w / 2,
     handY: PILE.y + PILE.h / 2,
-    starJump: false,
+    press: false,
   };
 }
 
@@ -44,16 +44,16 @@ function overHopper(): RefinerHandInput {
     handsTogether: true,
     handX: HOPPER.x + HOPPER.w / 2,
     handY: HOPPER.y + HOPPER.h / 2,
-    starJump: false,
+    press: false,
   };
 }
 
-function jump(): RefinerHandInput {
-  return { present: true, handsTogether: false, handX: 480, handY: 270, starJump: true };
+function press(): RefinerHandInput {
+  return { present: true, handsTogether: false, handX: 480, handY: 270, press: true };
 }
 
 function rest(): RefinerHandInput {
-  return { present: true, handsTogether: false, handX: 480, handY: 270, starJump: false };
+  return { present: true, handsTogether: false, handX: 480, handY: 270, press: false };
 }
 
 /** Grab one ore: hold both hands over the pile past the dwell. */
@@ -154,7 +154,7 @@ describe('RefinerMachine grab', () => {
       handsTogether: true,
       handX: 480,
       handY: 270,
-      starJump: false,
+      press: false,
     };
     expect(machine.update(elsewhere, PILE, HOPPER, 0)).toBeNull();
     expect(machine.update(elsewhere, PILE, HOPPER, 500)).toBeNull();
@@ -170,7 +170,7 @@ describe('RefinerMachine grab', () => {
   });
 });
 
-describe('RefinerMachine carry + hopper + star jumps', () => {
+describe('RefinerMachine carry + hopper + pedestal presses', () => {
   it('carry to the hopper drops the ore and fills 1/2, then 2/2', () => {
     const { machine } = setup();
     let t = 0;
@@ -182,27 +182,27 @@ describe('RefinerMachine carry + hopper + star jumps', () => {
     t = grab(machine, t);
     drop(machine, t);
     expect(machine.snapshot().hopperFill).toBe(2);
-    expect(machine.snapshot().phase).toBe('jumping');
+    expect(machine.snapshot().phase).toBe('pressing');
   });
 
-  it('3 star jumps complete the batch: +1 output, hopper resets', () => {
+  it('3 pedestal presses complete the batch: +1 output, hopper resets', () => {
     const { machine, stock } = setup(20);
     let t = 0;
     t = grab(machine, t);
     t = drop(machine, t);
     t = grab(machine, t);
     t = drop(machine, t);
-    expect(machine.snapshot().phase).toBe('jumping');
+    expect(machine.snapshot().phase).toBe('pressing');
     // 18 ore left (20 - 2 carried in); none refined yet.
     expect(stock.owned('ferrite-shale')).toBe(18);
     expect(stock.owned('refined-ferrite')).toBe(0);
 
-    const first = machine.update(jump(), PILE, HOPPER, t + 16);
-    expect(first?.kind).toBe('star-jump');
-    expect(machine.snapshot().jumpsDone).toBe(1);
-    machine.update(jump(), PILE, HOPPER, t + 32);
-    expect(machine.snapshot().jumpsDone).toBe(2);
-    const done = machine.update(jump(), PILE, HOPPER, t + 48);
+    const first = machine.update(press(), PILE, HOPPER, t + 16);
+    expect(first?.kind).toBe('press');
+    expect(machine.snapshot().pressesDone).toBe(1);
+    machine.update(press(), PILE, HOPPER, t + 32);
+    expect(machine.snapshot().pressesDone).toBe(2);
+    const done = machine.update(press(), PILE, HOPPER, t + 48);
     expect(done?.kind).toBe('batch-complete');
     expect(machine.snapshot().batchesDone).toBe(1);
     expect(machine.snapshot().hopperFill).toBe(0);
@@ -210,10 +210,10 @@ describe('RefinerMachine carry + hopper + star jumps', () => {
     expect(stock.owned('ferrite-shale')).toBe(18);
   });
 
-  it('star jumps before the hopper is full do nothing', () => {
+  it('pedestal presses before the hopper is full do nothing', () => {
     const { machine } = setup();
-    expect(machine.update(jump(), PILE, HOPPER, 100)).toBeNull();
-    expect(machine.snapshot().jumpsDone).toBe(0);
+    expect(machine.update(press(), PILE, HOPPER, 100)).toBeNull();
+    expect(machine.snapshot().pressesDone).toBe(0);
   });
 
   it('leaving mid-batch returns carried + hopper ore to inventory', () => {
@@ -241,7 +241,7 @@ describe('RefinerMachine carry + hopper + star jumps', () => {
     expect(machine.snapshot().phase).toBe('pick');
   });
 
-  it('rest does not advance the jump count', () => {
+  it('rest does not advance the press count', () => {
     const { machine } = setup();
     let t = 0;
     t = grab(machine, t);
@@ -249,6 +249,6 @@ describe('RefinerMachine carry + hopper + star jumps', () => {
     t = grab(machine, t);
     t = drop(machine, t);
     expect(machine.update(rest(), PILE, HOPPER, t + 16)).toBeNull();
-    expect(machine.snapshot().jumpsDone).toBe(0);
+    expect(machine.snapshot().pressesDone).toBe(0);
   });
 });

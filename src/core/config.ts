@@ -97,13 +97,12 @@ export const GATE = {
  *   not carry wrist visibility). What the gate checks is shoulders +
  *   hips; knees are NOT required. Grace 1500 ms: a brief dip while
  *   reaching or leaning must not trip it.
- * - `refiner-jump` (star jumps): same body rule as carry (shoulders
- *   + hips, 1500 ms grace). The ankles are the jump signal, but the
- *   leg-spread check lives in the star-jump detector itself — the
- *   gate cannot see ankle visibility (BodyState does not carry it),
- *   so it does not pretend to. If `BodyState` ever carries wrist /
- *   ankle visibility, the gate requirements should grow `requireWrists`
- *   / `requireAnkles` and enforce them here.
+ * - `refiner-press` (pedestal presses): same body rule as carry
+ *   (shoulders + hips, 1500 ms grace). The buttons are the press
+ *   detector's job — the gate cannot see wrist visibility
+ *   (`BodyState` does not carry it), so it does not pretend to. If
+ *   `BodyState` ever carries wrist visibility, the gate requirements
+ *   should grow `requireWrists` and enforce it here.
  * - `picker`: null — no gate at all. Picking a recipe is a mouse
  *   click; no body is needed, and the gate must not pause anything
  *   or draw anything over the chips. The caller passes null as the
@@ -112,7 +111,7 @@ export const GATE = {
 export const GATE_ACTIVITIES = {
   swing: { requireKnees: true, gracePeriodMs: 500 },
   'refiner-carry': { requireKnees: false, gracePeriodMs: 1500 },
-  'refiner-jump': { requireKnees: false, gracePeriodMs: 1500 },
+  'refiner-press': { requireKnees: false, gracePeriodMs: 1500 },
   picker: null,
 } as const;
 
@@ -449,47 +448,64 @@ export const SWING = {
   weakTickDurationSec: 0.08,
 } as const;
 
-/** Star-jump detector tuning (`core/starJump.ts`). A star jump is a
- * jumping-jack shape: jumping + arms out wide + legs apart. Forgiving
- * on purpose — Brandon is not a gymnast; the detector judges the
- * shape, not perfection. */
-export const STAR_JUMP = {
+/** Pedestal-press detector tuning (`core/pressDetector.ts`, v3.4).
+ * A press is both wrists inside their button zones + moving downward
+ * + held for `holdMs`. Replaces the star jump (v3.1-3.3): Brandon is
+ * too tall for his room to jump without his head/hands leaving the
+ * frame, so the jump never counted — the press needs arms only, no
+ * vertical space, no legs. Forgiving on purpose: the zones are wide
+ * (0.5 torso) and the hold is short (300 ms); the detector judges
+ * the press, not perfection. */
+export const PRESS = {
   /**
-   * Wrist-to-wrist spread, in torso lengths, for "arms out wide".
-   * Shoulder width is ~0.73 torso, so arms straight up read ~0.73;
-   * arms angled out ±35° (the sim's Q/E) read ~1.9. 1.2 sits between:
-   * clearly wider than overhead, well below a full T-pose (~2.2).
+   * Both wrists must stay inside their button zones this long (ms)
+   * while moving downward, to count one press. A pass-through wave
+   * must not press by accident.
    */
-  minWristSpreadTorsoFrac: 1.2,
+  holdMs: 300,
   /**
-   * Both wrists must be at least this far ABOVE the shoulder (torso
-   * lengths) — the arms are up/out, not hanging wide at the sides.
-   * 0.1 is barely above the shoulder line: a jack's arms are high,
-   * but a tired player's arms still count.
-   */
-  minWristHeightTorsoFrac: 0.1,
-  /**
-   * Ankle-to-ankle spread, in torso lengths, for "legs apart".
-   * Standing hip width reads ~0.59; a jumping jack's feet land
-   * ~1.0-1.4 apart. 0.85 splits the gap with margin both ways.
-   */
-  minAnkleSpreadTorsoFrac: 0.85,
-  /**
-   * Minimum ms between counted star jumps. A single jack crosses the
-   * shape for several frames at ~9 Hz inference; the re-arm (land
-   * first) does most of the work, this is the backstop.
+   * Minimum ms between counted presses. The re-arm (a wrist must
+   * leave its zone first) does most of the work; this is the
+   * backstop against a noisy frame double-counting.
    */
   minIntervalMs: 500,
+  /**
+   * Button-zone centres sit this far (torso lengths) left/right of
+   * the hip-mid. 0.8 puts the buttons just outside shoulder width
+   * (~0.73 torso) — reachable with the arms angled out, without a
+   * full T-pose (~2.2 torso wrist-to-wrist).
+   */
+  buttonOffsetTorsoFrac: 0.8,
+  /** Button-zone width, in torso lengths. */
+  buttonZoneWTorsoFrac: 0.5,
+  /** Button-zone height, in torso lengths. */
+  buttonZoneHTorsoFrac: 0.4,
+  /**
+   * Button-zone top, relative to the hip line, in torso lengths.
+   * -0.15 puts the top just above the hips: the buttons sit at
+   * waist height, where the hands naturally fall.
+   */
+  buttonZoneTopOffsetTorsoFrac: -0.15,
+  /**
+   * Pedestals slide in from off-screen over this long (ms) once the
+   * hopper fills — render only; the detector does not read it.
+   */
+  slideMs: 400,
+  /**
+   * How far the button travels down when pressed, in torso lengths
+   * — render only; the detector does not read it.
+   */
+  pressDepthTorsoFrac: 0.12,
 } as const;
 
 /** Refiner tuning (`games/refiner/`). */
 export const REFINER = {
   /** Ore shown in the pile at once; the pile refills from owned stock. */
   pileVisibleMax: 10,
-  /** Ore a recipe needs in the hopper before star jumps start. */
+  /** Ore a recipe needs in the hopper before pressing starts. */
   hopperCapacity: 2,
-  /** Star jumps that complete one batch. */
-  starJumpsPerBatch: 3,
+  /** Pedestal presses that complete one batch. */
+  pressesPerBatch: 3,
   /**
    * Both hands must stay over the pile this long (ms) before one ore
    * sticks — a pass-through wave must not grab by accident.
@@ -611,10 +627,16 @@ export const CAMERA = {
   facingMode: 'user' as const,
 } as const;
 
-/** Game registry for the hub. `enabled: false` games show as "Coming soon". */
+/**
+ * Game registry for the hub: every entry renders as a game card on
+ * the select screen (`main.ts`). No Lumberjack here — it is not a
+ * RuneSweat skill (Brandon's standing decision, v3.3 removed it
+ * from the hub's coming-soon list and v3.4 removed this registry
+ * entry, the last place it appeared in the UI). The parked vision
+ * doc (`docs/vision-lumberjack.md`) is history, not a game.
+ */
 export const GAMES = {
   swingLab: { id: 'swing-lab', title: 'Swing Lab', enabled: true },
-  lumberjack: { id: 'lumberjack', title: 'Lumberjack', enabled: false },
 } as const;
 
 /** Debug affordances. */

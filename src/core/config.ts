@@ -448,6 +448,55 @@ export const SWING = {
   weakTickDurationSec: 0.08,
 } as const;
 
+/**
+ * Swing Lab node geometry (v3.7, Nov 5, 2026): the node is a FIXED
+ * object anchored to the bottom centre of the stage, NOT a follower
+ * of the body's hip centre. Brandon's v3.6 playtest verdict: the
+ * player places THEMSELVES behind the node to smack it — the node
+ * does not chase the player. The avatar is drawn behind the node
+ * (main.ts draws the avatar first, the game second), so the rock
+ * covers the lower body exactly as it did when it followed the hips.
+ *
+ * Numbers (960x540 stage): rx = 0.22 * 540 = 118.8, ry = 0.17 * 540
+ * = 91.8 — the v3 size, unchanged. Centre x = 480 (stage centre).
+ * Centre y = 540 - 91.8 - 45.9 = 402.3: the bottom of the rock sits
+ * 45.9 px above the stage bottom, which leaves room for the HP pips
+ * drawn under the rock (pips centre at y + ry + 26 = 520.1, text
+ * bottom ~531, inside the stage). For the sim body standing centre
+ * this is the same spot the v3 hip-following node sat (402.6), so a
+ * centred player sees no visual move at all — only an off-centre
+ * player sees the difference, which is the point.
+ *
+ * The alignment threshold is in torso lengths (the body's own unit,
+ * so it works near and far from the camera): 0.3 torso is ~0.09 of
+ * stage width for the sim body (torso 0.3), i.e. the hips ~86 px off
+ * the node centre on a 960 stage. The rock's half-width is ~0.41
+ * torso, so the hint fires while the hips are still over the rock
+ * but clearly off-centre — early enough to be useful, late enough
+ * that small drift does not nag. The hint is advisory only: the
+ * swing machine never reads it and a misaligned swing still counts.
+ */
+export const NODE = {
+  /** Node width as a fraction of min(stage width, stage height). */
+  widthFracOfMin: 0.44,
+  /** Node height as a fraction of min(stage width, stage height). */
+  heightFracOfMin: 0.34,
+  /** Node centre x as a fraction of stage width (0.5 = centred). */
+  centreXFracOfWidth: 0.5,
+  /**
+   * Gap between the bottom of the rock and the bottom of the stage,
+   * as a fraction of stage height. Sized by the HP pips under the
+   * rock, not by looks: pips sit at centre + ry + 26 px, so the gap
+   * must clear ry + 26 px + ~11 px of text half-height.
+   */
+  bottomGapFracOfHeight: 0.085,
+  /**
+   * Hip centre further than this many torso lengths sideways from
+   * the node centre counts as misaligned ("Step behind the node").
+   */
+  alignThresholdTorsoFrac: 0.3,
+} as const;
+
 /** Pedestal-press detector tuning (`core/pressDetector.ts`, v3.4).
  * A press is both wrists inside their button zones + moving downward
  * + held for `holdMs`. Replaces the star jump (v3.1-3.3): Brandon is

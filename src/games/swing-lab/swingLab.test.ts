@@ -5,10 +5,12 @@ import { BodyStateTracker } from '../../core/bodyState';
 import { inventory } from '../../core/inventory';
 import { MouseSource } from '../../sim/mouseSource';
 import {
+  alignmentHintForBody,
+  alignmentOffsetTorsoFrac,
   BREAK,
   cracksForHits,
   miningLevel,
-  nodeCenterForBody,
+  nodeGeometryForStage,
   nodeRadiiForStage,
   pickaxeAnchorForBody,
   respawnBarRect,
@@ -306,6 +308,7 @@ describe('Swing Lab node + pickaxe geometry', () => {
     present?: boolean;
     torsoX?: number;
     torsoY?: number;
+    torsoLength?: number;
     rightWristX?: number;
     rightWristY?: number;
     rightArmAngleDeg?: number;
@@ -314,22 +317,28 @@ describe('Swing Lab node + pickaxe geometry', () => {
       present: fields.present ?? true,
       torsoX: fields.torsoX ?? 0.5,
       torsoY: fields.torsoY ?? 0.55,
+      torsoLength: fields.torsoLength ?? 0.3,
       rightWristX: fields.rightWristX ?? 0.5,
       rightWristY: fields.rightWristY ?? 0.5,
       rightArm: { angleDeg: fields.rightArmAngleDeg ?? 0 },
     } as unknown as BodyState;
   }
 
-  it('node sits at the hip-centre x, rock-top just below waist height', () => {
-    const body = fakeBody({ torsoX: 0.4, torsoY: 0.55 });
-    const { x, y, rx, ry } = nodeCenterForBody(body, 960, 540);
-    // Mirrored hip x: (1 - 0.4) * 960 = 576.
-    expect(x).toBeCloseTo(576, 6);
-    // v3 radii: rx = 0.22 * 540 = 118.8, ry = 0.17 * 540 = 91.8.
+  it('v3.7 node is fixed to the bottom centre of the stage (960x540)', () => {
+    const { x, y, rx, ry } = nodeGeometryForStage(960, 540);
+    // Centre x = stage centre; size unchanged from v3.
+    expect(x).toBe(480);
     expect(rx).toBeCloseTo(118.8, 6);
     expect(ry).toBeCloseTo(91.8, 6);
-    // Centre is 1.15 radii below the hips: 0.55 * 540 + 91.8 * 1.15.
-    expect(y).toBeCloseTo(0.55 * 540 + 91.8 * 1.15, 6);
+    // Centre y = height - ry - 0.085 * height = 402.3: the bottom of
+    // the rock sits 45.9 px above the stage bottom.
+    expect(y).toBeCloseTo(540 - 91.8 - 540 * 0.085, 6);
+    expect(y + ry).toBeCloseTo(540 - 540 * 0.085, 6);
+    // The top of the rock sits below the hips (hip line 0.55 * 540),
+    // as in v3 — it covers the legs, not the upper body.
+    expect(y - ry).toBeGreaterThan(0.55 * 540);
+    // The HP pips drawn under the rock (y + ry + 26) still fit on stage.
+    expect(y + ry + 26).toBeLessThan(540);
   });
 
   it('v3 node is bigger, wider and lower than v2 (not just rescaled)', () => {
@@ -339,11 +348,7 @@ describe('Swing Lab node + pickaxe geometry', () => {
     const hipY = 0.55 * 540;
     const v2Top = hipY - v2Radius * 0.5;
     const v2Bottom = hipY + v2Radius * 1.5;
-    const { y, rx, ry } = nodeCenterForBody(
-      fakeBody({ torsoX: 0.5, torsoY: 0.55 }),
-      960,
-      540,
-    );
+    const { y, rx, ry } = nodeGeometryForStage(960, 540);
     // Wider: half-width 118.8 vs v2's 81. Taller too (ry 91.8 > 81).
     expect(rx).toBeGreaterThan(v2Radius);
     expect(ry).toBeGreaterThan(v2Radius);
@@ -366,23 +371,20 @@ describe('Swing Lab node + pickaxe geometry', () => {
     });
   });
 
-  it('node follows the body when the player moves sideways', () => {
-    const left = nodeCenterForBody(fakeBody({ torsoX: 0.65 }), 960, 540);
-    const right = nodeCenterForBody(fakeBody({ torsoX: 0.35 }), 960, 540);
-    expect(left.x).toBeLessThan(right.x);
-    expect(left.x).toBeCloseTo((1 - 0.65) * 960, 6);
-    expect(right.x).toBeCloseTo((1 - 0.35) * 960, 6);
-  });
-
-  it('node falls back to stage centre with no body', () => {
-    const noBody = nodeCenterForBody(null, 960, 540);
-    expect(noBody.x).toBe(480);
-    expect(noBody.y).toBeCloseTo(540 * 0.62, 6);
-    expect(noBody.rx).toBeCloseTo(540 * 0.22, 6);
-    expect(noBody.ry).toBeCloseTo(540 * 0.17, 6);
-    const absent = nodeCenterForBody(fakeBody({ present: false }), 960, 540);
-    expect(absent.x).toBe(480);
-    expect(absent.y).toBeCloseTo(540 * 0.62, 6);
+  it('v3.7 node geometry takes no body: same rect whatever the hips do', () => {
+    // The geometry function has no body parameter at all — there is
+    // no input left for the node to follow. The game-level proof (the
+    // live node rect is identical for bodies standing left, right and
+    // centre) is in the v3.7 describe block below.
+    expect(nodeGeometryForStage(960, 540)).toEqual(
+      nodeGeometryForStage(960, 540),
+    );
+    const otherStage = nodeGeometryForStage(800, 600);
+    expect(otherStage.x).toBe(400);
+    expect(otherStage.rx).toBeCloseTo(600 * 0.22, 6);
+    expect(otherStage.ry).toBeCloseTo(600 * 0.17, 6);
+    expect(otherStage.y).toBeCloseTo(600 - 600 * 0.17 - 600 * 0.085, 6);
+    expect(otherStage.y + otherStage.ry + 26).toBeLessThan(600);
   });
 
   it('pickaxe anchors at the right wrist, never the wrist midpoint', () => {
@@ -1181,7 +1183,7 @@ describe('Swing Lab v3.2: one instruction surface + banner zones', () => {
     ctx.game.render(rec.ctx, renderMs, body, null);
     const floater = rec.fillTexts.find((x) => x.text === '+15 XP');
     expect(floater).toBeDefined();
-    const node = nodeCenterForBody(body, 960, 540);
+    const node = nodeGeometryForStage(960, 540);
     // Right of the node (node right edge = centre + radius), clear
     // of the torso behind the rock.
     expect(floater?.x ?? 0).toBeGreaterThan(node.x + node.rx);
@@ -1211,5 +1213,191 @@ describe('Swing Lab v3.2: one instruction surface + banner zones', () => {
         handedness: 'two-handed',
       } as never),
     ).toBe('Two-handed! Hands up for the next swing!');
+  });
+});
+
+/**
+ * v3.7 (Nov 5, 2026): fixed node + alignment hint. The node is a
+ * fixed object at the bottom centre of the stage — the player moves
+ * to stand behind it, it never follows the hips. The hint is
+ * advisory only: a misaligned swing still counts. And the swing
+ * machine never sees knees at all (windup, velocity, strike line
+ * and hands-together are all arms-based, in torso units from
+ * shoulders/hips), so hiding the knees changes nothing at detector
+ * level — the gate is the only thing that ever cared, and it is not
+ * under test here.
+ */
+describe('Swing Lab v3.7: fixed node + alignment hint', () => {
+  function setup() {
+    const mouse = new MouseSource();
+    const tracker = new BodyStateTracker();
+    const game = new SwingLabGame(new SoundEffects());
+    mouse.start(0);
+    game.start();
+    return { mouse, tracker, game };
+  }
+
+  function step(
+    ctx: ReturnType<typeof setup>,
+    fromMs: number,
+    toMs: number,
+  ): void {
+    for (let t = fromMs + 16; t <= toMs; t += 16) {
+      const frame = ctx.mouse.frameAt(t);
+      if (frame === null) continue;
+      const body = ctx.tracker.update(frame);
+      ctx.game.update(16, t, body, frame.landmarks);
+    }
+  }
+
+  /** Step with the knees hidden on every frame before the game sees it. */
+  function stepKneesHidden(
+    ctx: ReturnType<typeof setup>,
+    fromMs: number,
+    toMs: number,
+  ): void {
+    for (let t = fromMs + 16; t <= toMs; t += 16) {
+      const frame = ctx.mouse.frameAt(t);
+      if (frame === null) continue;
+      const body = ctx.tracker.update(frame);
+      body.landmarkVisibility.leftKnee = 0;
+      body.landmarkVisibility.rightKnee = 0;
+      body.kneesVisible = false;
+      ctx.game.update(16, t, body, frame.landmarks);
+    }
+  }
+
+  function doSwing(ctx: ReturnType<typeof setup>, t: number): number {
+    ctx.mouse.setKeyArm('left', true);
+    ctx.mouse.setKeyArm('right', true);
+    step(ctx, t, t + 500);
+    ctx.mouse.setKeyArm('left', false);
+    ctx.mouse.setKeyArm('right', false);
+    step(ctx, t + 500, t + 900);
+    return t + 900;
+  }
+
+  /** Minimal BodyState for the pure alignment helpers. */
+  function alignedBody(fields: {
+    present?: boolean;
+    torsoX?: number;
+    torsoLength?: number;
+  }): BodyState {
+    return {
+      present: fields.present ?? true,
+      torsoX: fields.torsoX ?? 0.5,
+      torsoLength: fields.torsoLength ?? 0.3,
+    } as unknown as BodyState;
+  }
+
+  it('the live node rect is identical whether the player stands left, right or centre', () => {
+    const ctx = setup();
+    const fixed = nodeGeometryForStage(960, 540);
+    // Left: pointer x 0.3 puts the hips 0.2 / 0.3 = 0.67 torso off centre.
+    ctx.mouse.setPointer({ x: 0.3, y: 0.55 }, false);
+    step(ctx, 0, 500);
+    expect(ctx.game.snapshot().node).toEqual(fixed);
+    // Centre.
+    ctx.mouse.setPointer({ x: 0.5, y: 0.55 }, false);
+    step(ctx, 500, 1000);
+    expect(ctx.game.snapshot().node).toEqual(fixed);
+    // Right.
+    ctx.mouse.setPointer({ x: 0.7, y: 0.55 }, false);
+    step(ctx, 1000, 1500);
+    expect(ctx.game.snapshot().node).toEqual(fixed);
+    // And the pure geometry agrees: bottom centre, v3 size.
+    expect(fixed.x).toBe(480);
+    expect(fixed.y).toBeCloseTo(402.3, 6);
+    expect(fixed.rx).toBeCloseTo(118.8, 6);
+    expect(fixed.ry).toBeCloseTo(91.8, 6);
+  });
+
+  it('alignment offset is 0 centred, ~0.5 torso at 0.15 off-centre, null with no body', () => {
+    expect(alignmentOffsetTorsoFrac(alignedBody({ torsoX: 0.5 }))).toBe(0);
+    expect(
+      alignmentOffsetTorsoFrac(alignedBody({ torsoX: 0.35 })),
+    ).toBeCloseTo(-0.5, 6);
+    expect(
+      alignmentOffsetTorsoFrac(alignedBody({ torsoX: 0.65 })),
+    ).toBeCloseTo(0.5, 6);
+    expect(alignmentOffsetTorsoFrac(null)).toBeNull();
+    expect(
+      alignmentOffsetTorsoFrac(alignedBody({ present: false })),
+    ).toBeNull();
+    expect(
+      alignmentOffsetTorsoFrac(alignedBody({ torsoLength: 0 })),
+    ).toBeNull();
+  });
+
+  it('the hint fires past 0.3 torso off-centre and stays silent inside it', () => {
+    expect(alignmentHintForBody(alignedBody({ torsoX: 0.5 }))).toBeNull();
+    // 0.08 off-centre = 0.27 torso: inside the threshold, silent.
+    expect(alignmentHintForBody(alignedBody({ torsoX: 0.42 }))).toBeNull();
+    expect(alignmentHintForBody(alignedBody({ torsoX: 0.58 }))).toBeNull();
+    // 0.15 off-centre = 0.5 torso: past it, on either side.
+    expect(alignmentHintForBody(alignedBody({ torsoX: 0.35 }))).toBe(
+      'Step behind the node',
+    );
+    expect(alignmentHintForBody(alignedBody({ torsoX: 0.65 }))).toBe(
+      'Step behind the node',
+    );
+    expect(alignmentHintForBody(null)).toBeNull();
+  });
+
+  it('the HUD shows the hint off-centre and clears it when the player lines up', () => {
+    const ctx = setup();
+    ctx.mouse.setPointer({ x: 0.3, y: 0.55 }, false);
+    step(ctx, 0, 1000);
+    expect(ctx.game.snapshot().alignmentHint).toBe('Step behind the node');
+    expect(ctx.game.hudHtml()).toContain('Step behind the node');
+    // Walk back to centre: the hint clears, nothing else changes.
+    ctx.mouse.setPointer({ x: 0.5, y: 0.55 }, false);
+    step(ctx, 1000, 2000);
+    expect(ctx.game.snapshot().alignmentHint).toBeNull();
+    expect(ctx.game.hudHtml()).not.toContain('Step behind the node');
+    expect(ctx.game.hudHtml()).toContain(
+      'Both hands up together, then chop down in front of you!',
+    );
+  });
+
+  it('a swing still counts with the knees hidden (detector level)', () => {
+    const ctx = setup();
+    ctx.mouse.setKeyArm('left', true);
+    ctx.mouse.setKeyArm('right', true);
+    stepKneesHidden(ctx, 0, 500);
+    ctx.mouse.setKeyArm('left', false);
+    ctx.mouse.setKeyArm('right', false);
+    stepKneesHidden(ctx, 500, 900);
+    const snap = ctx.game.snapshot();
+    expect(snap.swings).toBe(1);
+    expect(snap.ore).toBe(1);
+    expect(snap.xp).toBe(15);
+    expect(snap.nodeHits).toBe(1);
+    expect(snap.lastEvent?.kind).toBe('hit');
+  });
+
+  it('a full mining loop completes with the fixed node while misaligned: hint only, never a block', () => {
+    const ctx = setup();
+    // Stand well off-centre (0.5 torso): the hint is on the whole time.
+    ctx.mouse.setPointer({ x: 0.3, y: 0.55 }, false);
+    step(ctx, 0, 500);
+    expect(ctx.game.hudHtml()).toContain('Step behind the node');
+    let t = 500;
+    for (let i = 0; i < 5; i += 1) {
+      t = doSwing(ctx, t);
+      step(ctx, t, t + 800);
+      t += 800;
+    }
+    const snap = ctx.game.snapshot();
+    expect(snap.swings).toBe(5);
+    expect(snap.ore).toBe(5);
+    expect(snap.xp).toBe(75);
+    expect(snap.nodesBroken).toBe(1);
+    expect(snap.nodeHits).toBe(0);
+    expect(snap.nodeGone).toBe(true);
+    // The node never moved for any of it, and the hint never blocked
+    // a swing — it is still showing, because the body is still off-centre.
+    expect(snap.node).toEqual(nodeGeometryForStage(960, 540));
+    expect(snap.alignmentHint).toBe('Step behind the node');
   });
 });

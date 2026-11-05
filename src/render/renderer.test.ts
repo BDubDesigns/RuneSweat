@@ -124,7 +124,7 @@ function fontRecordingContext(): {
 describe('drawGateBanner measures at the drawn font (v3.3)', () => {
   it('a long message never clips: the pill is sized at the 20px bold font', () => {
     const message =
-      "I can't see your knees — step back so I can see your whole body";
+      "I can't see your shoulders — step back so I can see your whole body";
     const rec = fontRecordingContext();
     drawGateBanner(rec.ctx, 960, 540, message);
     // The font was set before measureText ran.
@@ -148,7 +148,7 @@ describe('drawGateBanner measures at the drawn font (v3.3)', () => {
 
   it('the real gate message fits, and gateBannerRect caps/minimums still hold', () => {
     const rec = fontRecordingContext();
-    drawGateBanner(rec.ctx, 960, 540, "I can't see your knees — step back");
+    drawGateBanner(rec.ctx, 960, 540, "I can't see your shoulders — step back");
     const textWidth = rec.measured[0]?.width ?? 0;
     expect(rec.fills[0]?.w).toBe(textWidth + GATE_BANNER.paddingX * 2);
     // A long message caps at the stage width (12 px margin each side).

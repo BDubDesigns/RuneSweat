@@ -198,7 +198,7 @@ export function drawGateBanner(
   // with this font, so measuring before the font is set sizes the
   // pill for whatever font the previous draw left behind — the Nov 4
   // playtest frame showed the text running past the pill edge
-  // ("I can't see your knees — ste").
+  // ("I can't see your shoulders — st").
   ctx.font = `700 ${GATE_BANNER.fontPx}px ${RENDER.gameFont}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';

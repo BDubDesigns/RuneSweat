@@ -97,7 +97,7 @@ export interface RefinerZone {
  *
  * v3.2 (Brandon's idea, Nov 4 playtest): the zones were far left
  * (centre 0.16w) and far right (0.84w), so the player leaned and
- * shifted side to side to reach them and their hips/knees slid out
+ * shifted side to side to reach them and their hips slid out
  * of frame — which tripped the gate mid-refine. Centres are now
  * 0.30w / 0.70w: a ~0.20w reach from a centred stance, well inside
  * the ~0.32w arm reach, while the pile's right edge (0.42w) still

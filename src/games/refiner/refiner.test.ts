@@ -1074,7 +1074,7 @@ describe('RefinerGame picker cards (v3.2)', () => {
 /**
  * Pile / hopper pulled toward the centre (v3.2, Brandon's idea, Nov 4
  * playtest): the far-left / far-right zones made the player lean and
- * shift side to side, sliding hips/knees out of frame and tripping
+ * shift side to side, sliding hips out of frame and tripping
  * the gate mid-refine. The zones move inward — but not so far that
  * they crowd the avatar, and the hands must still reach them from a
  * centred stance without bending forward.

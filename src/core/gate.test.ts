@@ -7,9 +7,12 @@ import {
   shouldShowGateBanner,
   type ModelState,
 } from './gate';
+import { ActionButtonDwell, actionButtonGeometry, pointInActionCircle } from './actionButton';
 import { BodyStateTracker, type BodyState } from './bodyState';
 import { makeFrame, makePose } from './poseFixture';
+import { confirmHandPoint, PointerController, pointerHandPoint } from './pointer';
 import { PoseLandmark } from '../tracking/poseTypes';
+import { toCanvas } from '../render/stage';
 import { MouseSource } from '../sim/mouseSource';
 
 function usableBody(): BodyState {
@@ -102,12 +105,15 @@ describe('evaluateGate', () => {
     expect(gate.gated).toBe(false);
   });
 
-  it('a knees-hidden body gates: knees are required for swing games', () => {
+  it('a knees-hidden body passes: knees are not a gate input (v3.7)', () => {
     const body = kneesHiddenBody();
-    expect(body.bodyUsable).toBe(false);
+    expect(body.kneesVisible).toBe(false);
+    expect(body.bodyUsable).toBe(true);
+    // The global fallback (no requirements) is the shoulders + hips
+    // rule too, so the knees-hidden body opens the gate outright.
     const gate = evaluateGate(body, 1000, null, 'ready');
-    expect(gate.gated).toBe(true);
-    expect(gate.reason).toBe('no-body');
+    expect(gate.gated).toBe(false);
+    expect(gate.reason).toBe('open');
   });
 });
 
@@ -273,13 +279,17 @@ describe('shouldShowGateBanner', () => {
 });
 
 /**
- * Per-activity gate requirements (v3.2, Nov 4 playtest): the refining
- * gate kept firing while Brandon was standing right there — the global
- * rule required knees, and a side reach dipped the far knee. The
- * refiner drops the knee requirement and gets a longer grace; the
- * swing keeps both; the picker has no gate at all.
+ * Per-activity gate requirements (v3.2, Nov 4 playtest; knees dropped
+ * for every activity in v3.7, Nov 5): the refining gate kept firing
+ * while Brandon was standing right there — the global rule required
+ * knees, and a side reach dipped the far knee. The refiner dropped
+ * the knee requirement first; the v3.6 playtest showed the swing
+ * failing the same way at the top of a reach for the action circle,
+ * so v3.7 drops knees everywhere. What differs per activity now is
+ * only the grace: swing 500 ms, refiner 1500 ms; the picker has no
+ * gate at all.
  */
-describe('per-activity gate requirements (v3.2)', () => {
+describe('per-activity gate requirements (v3.2, knees dropped v3.7)', () => {
   /** A body whose shoulders the model barely sees. */
   function shouldersHiddenBody(): BodyState {
     const tracker = new BodyStateTracker();
@@ -292,38 +302,36 @@ describe('per-activity gate requirements (v3.2)', () => {
     return tracker.update(makeFrame(pose, 1000));
   }
 
+  /** A body whose hips the model barely sees. */
+  function hipsHiddenBody(): BodyState {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      visibilityOverrides: {
+        [PoseLandmark.LEFT_HIP]: 0.1,
+        [PoseLandmark.RIGHT_HIP]: 0.1,
+      },
+    });
+    return tracker.update(makeFrame(pose, 1000));
+  }
+
   it('gateRequirementsFor returns the per-activity presets', () => {
     expect(gateRequirementsFor('swing')).toEqual({
-      requireKnees: true,
       gracePeriodMs: 500,
     });
     expect(gateRequirementsFor('refiner-carry')).toEqual({
-      requireKnees: false,
       gracePeriodMs: 1500,
     });
     expect(gateRequirementsFor('refiner-press')).toEqual({
-      requireKnees: false,
       gracePeriodMs: 1500,
     });
     expect(gateRequirementsFor('picker')).toBeNull();
   });
 
-  it('refiner pick/carry opens with knees hidden; the swing does not', () => {
+  it('swing AND refiner open with knees hidden (v3.7)', () => {
     const body = kneesHiddenBody();
-    expect(body.bodyUsable).toBe(false);
-    expect(
-      bodyUsableForActivity(body, gateRequirementsFor('refiner-carry') ?? {
-        requireKnees: false,
-        gracePeriodMs: 1500,
-      }),
-    ).toBe(true);
-    expect(
-      bodyUsableForActivity(body, gateRequirementsFor('swing') ?? {
-        requireKnees: true,
-        gracePeriodMs: 500,
-      }),
-    ).toBe(false);
-    // End to end: the refiner gate opens on the same body.
+    expect(body.kneesVisible).toBe(false);
+    expect(bodyUsableForActivity(body)).toBe(true);
+    // End to end: both gates open on the same body.
     const carry = evaluateGate(body, 1000, null, 'ready', {
       requirements: gateRequirementsFor('refiner-carry'),
     });
@@ -332,8 +340,23 @@ describe('per-activity gate requirements (v3.2)', () => {
     const swing = evaluateGate(body, 1000, null, 'ready', {
       requirements: gateRequirementsFor('swing'),
     });
-    expect(swing.gated).toBe(true);
-    expect(swing.reason).toBe('no-body');
+    expect(swing.gated).toBe(false);
+    expect(swing.reason).toBe('open');
+  });
+
+  it('the gate still fails when shoulders or hips are hidden', () => {
+    for (const body of [shouldersHiddenBody(), hipsHiddenBody()]) {
+      expect(bodyUsableForActivity(body)).toBe(false);
+      for (const activity of ['swing', 'refiner-carry', 'refiner-press'] as const) {
+        const gate = evaluateGate(body, 1000, null, 'ready', {
+          requirements: gateRequirementsFor(activity),
+        });
+        expect(gate.gated).toBe(true);
+        expect(gate.reason).toBe('no-body');
+      }
+      // And the global fallback (no requirements) fails too.
+      expect(evaluateGate(body, 1000, null, 'ready').gated).toBe(true);
+    }
   });
 
   it('the pedestal-press phase uses the same carry rule (the buttons are the detector’s job)', () => {
@@ -409,23 +432,41 @@ describe('per-activity gate requirements (v3.2)', () => {
     expect(gate.reason).toBe('stale-frame');
   });
 
-  it('the no-body message names the missing landmarks', () => {
-    const knees = evaluateGate(kneesHiddenBody(), 1000, null, 'ready', {
-      requirements: gateRequirementsFor('swing'),
-    });
-    expect(knees.message).toBe("I can't see your knees — step back");
+  it('the no-body message names the missing landmarks — never knees', () => {
     const shoulders = evaluateGate(shouldersHiddenBody(), 1000, null, 'ready', {
       requirements: gateRequirementsFor('swing'),
     });
     expect(shoulders.message).toBe(
       "I can't see your shoulders — step back",
     );
+    const hips = evaluateGate(hipsHiddenBody(), 1000, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(hips.message).toBe("I can't see your hips — step back");
     // A lost body mid-game names what is missing too, not the generic line.
-    const lost = evaluateGate(kneesHiddenBody(), 2000, 1000, 'ready', {
+    const lost = evaluateGate(shouldersHiddenBody(), 2000, 1000, 'ready', {
       requirements: gateRequirementsFor('swing'),
     });
     expect(lost.gated).toBe(true);
-    expect(lost.message).toBe("I can't see your knees — step back");
+    expect(lost.message).toBe("I can't see your shoulders — step back");
+    // Knees hidden is not a missing part at all: the gate is open, so
+    // there is no message — and no gate message anywhere names knees.
+    const knees = evaluateGate(kneesHiddenBody(), 1000, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(knees.gated).toBe(false);
+    expect(knees.message).toBe('');
+    for (const body of [kneesHiddenBody(), shouldersHiddenBody(), hipsHiddenBody(), noBody()]) {
+      for (const activity of ['swing', 'refiner-carry', 'refiner-press'] as const) {
+        const gate = evaluateGate(body, 1000, null, 'ready', {
+          requirements: gateRequirementsFor(activity),
+        });
+        expect(gate.message.toLowerCase()).not.toContain('knee');
+      }
+      expect(
+        evaluateGate(body, 1000, null, 'ready').message.toLowerCase(),
+      ).not.toContain('knee');
+    }
     // No body at all keeps the generic lines (existing contract).
     expect(
       evaluateGate(noBody(), 1000, null, 'ready').message,
@@ -436,14 +477,143 @@ describe('per-activity gate requirements (v3.2)', () => {
     ).toBe("Step back — I can't see your body");
   });
 
-  it('missingBodyParts lists what is missing (knees only when required)', () => {
+  it('missingBodyParts lists what is missing (knees never listed)', () => {
     const body = kneesHiddenBody();
-    expect(
-      missingBodyParts(body, gateRequirementsFor('swing')),
-    ).toEqual(['knees']);
-    expect(
-      missingBodyParts(body, gateRequirementsFor('refiner-carry')),
-    ).toEqual([]);
-    expect(missingBodyParts(null, gateRequirementsFor('swing'))).toEqual([]);
+    expect(missingBodyParts(body)).toEqual([]);
+    expect(missingBodyParts(shouldersHiddenBody())).toEqual(['shoulders']);
+    expect(missingBodyParts(hipsHiddenBody())).toEqual(['hips']);
+    expect(missingBodyParts(null)).toEqual([]);
+  });
+});
+
+/**
+ * Upper-body-only gate + action-button hover/dwell (v3.7, Nov 5):
+ * the v3.6 playtest failure was Brandon reaching up to the top-right
+ * action circle, his knees leaving the frame, the gate tripping, and
+ * the hover/dwell doing nothing. `main.ts` only hands the pointer a
+ * point (and the dwell a confirm point) while `!currentGate.gated`,
+ * so the gate opening with knees hidden IS the hover/dwell fix —
+ * these tests drive the same chain the hub runs: gate -> pointer
+ * point -> hover -> confirm point in the circle -> dwell fires.
+ */
+describe('v3.7: knees-hidden body can hover the action circle and dwell to town', () => {
+  /**
+   * Brandon's reach shape: standing left of centre, right arm up
+   * toward the top-right circle, knees out of frame. The fixture
+   * math puts the smoothed right wrist at canvas ~(888, 57) on a
+   * 960x540 stage — inside the (888, 84) r36 circle — and the left
+   * (pointer) wrist mid-stage.
+   */
+  function reachingBody(): BodyState {
+    const tracker = new BodyStateTracker();
+    let state: BodyState | null = null;
+    for (let t = 1000; t <= 1100; t += 33) {
+      const pose = makePose({
+        torsoX: 0.25,
+        rightArmDeg: -63,
+        visibilityOverrides: {
+          [PoseLandmark.LEFT_KNEE]: 0.1,
+          [PoseLandmark.RIGHT_KNEE]: 0.1,
+        },
+      });
+      state = tracker.update(makeFrame(pose, t));
+    }
+    if (state === null) throw new Error('unreachable');
+    return state;
+  }
+
+  it('the swing gate opens for the reaching body (knees hidden)', () => {
+    const body = reachingBody();
+    expect(body.kneesVisible).toBe(false);
+    const gate = evaluateGate(body, 1100, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(gate.gated).toBe(false);
+    expect(gate.reason).toBe('open');
+  });
+
+  it('the pointer hand hovers while knees are hidden', () => {
+    const body = reachingBody();
+    const gate = evaluateGate(body, 1100, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    // main.ts hands the pointer a point only while the gate is open.
+    const point = gate.gated
+      ? null
+      : toCanvas(
+          { ...pointerHandPoint(body), visibility: 1 },
+          960,
+          540,
+        );
+    expect(point).not.toBeNull();
+    const pointer = new PointerController();
+    const selectable = {
+      id: 'recipe:refined-ferrite',
+      x: (point?.x ?? 0) - 50,
+      y: (point?.y ?? 0) - 30,
+      w: 100,
+      h: 60,
+    };
+    pointer.update(point, [selectable]);
+    expect(pointer.hoveredId).toBe('recipe:refined-ferrite');
+  });
+
+  it('the confirm hand dwells inside the top-right circle and fires (town mode)', () => {
+    const body = reachingBody();
+    const gate = evaluateGate(body, 1100, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(gate.gated).toBe(false);
+    const geometry = actionButtonGeometry(960, 540);
+    // main.ts hands the dwell a confirm point only while ungated.
+    const confirm = gate.gated
+      ? null
+      : toCanvas(
+          { ...confirmHandPoint(body), visibility: 1 },
+          960,
+          540,
+        );
+    expect(confirm).not.toBeNull();
+    // Genuinely reaching up-right, not just anywhere on stage.
+    expect(confirm?.x ?? 0).toBeGreaterThan(800);
+    expect(confirm?.y ?? 0).toBeLessThan(150);
+    const inside = pointInActionCircle(confirm?.x ?? 0, confirm?.y ?? 0, geometry);
+    expect(inside).toBe(true);
+    // Nothing hovered, so the circle is in town mode — the dwell
+    // firing is the "go to town" action (main.ts fires it).
+    const dwell = new ActionButtonDwell();
+    expect(dwell.update(inside, 1100)).toBe(false);
+    expect(dwell.update(inside, 2000)).toBe(false);
+    expect(dwell.progress(2000)).toBeGreaterThan(0);
+    expect(dwell.update(inside, 3099)).toBe(false);
+    expect(dwell.update(inside, 3100)).toBe(true);
+  });
+
+  it('a gated body gets no pointer point and no dwell (shoulders hidden)', () => {
+    const tracker = new BodyStateTracker();
+    const pose = makePose({
+      torsoX: 0.25,
+      rightArmDeg: -63,
+      visibilityOverrides: {
+        [PoseLandmark.LEFT_SHOULDER]: 0.1,
+        [PoseLandmark.RIGHT_SHOULDER]: 0.1,
+      },
+    });
+    const body = tracker.update(makeFrame(pose, 1000));
+    const gate = evaluateGate(body, 1000, null, 'ready', {
+      requirements: gateRequirementsFor('swing'),
+    });
+    expect(gate.gated).toBe(true);
+    // main.ts nulls the point when gated: hover clears, dwell starves.
+    const pointer = new PointerController();
+    pointer.update({ x: 800, y: 300 }, [
+      { id: 'mine', x: 750, y: 270, w: 100, h: 60 },
+    ]);
+    expect(pointer.hoveredId).toBe('mine');
+    pointer.update(null, [{ id: 'mine', x: 750, y: 270, w: 100, h: 60 }]);
+    expect(pointer.hoveredId).toBeNull();
+    const dwell = new ActionButtonDwell();
+    expect(dwell.update(false, 1000)).toBe(false);
+    expect(dwell.update(false, 4000)).toBe(false);
   });
 });

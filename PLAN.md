@@ -308,10 +308,10 @@ All in `src/core/config.ts`:
   swing = one hit; shorten only if the game feels sluggish between swings.
   `SWING.strikeLineTorsoFrac` (0.7) — how low the chop must finish.
 - `GATE.gracePeriodMs` (500) — how long a lost pose is tolerated before
-  the game pauses. `GATE.requireKnees` (true) — knees are required for
-  full-body swing games; set false only if a game genuinely doesn't need
-  legs. `GATE.staleFrameMs` (2000) — a pose frame older than this closes
-  the gate ("Pose feed frozen") even inside the grace period; raise it
+  the game pauses. (v3.7: `GATE.requireKnees` is deleted — knees are
+  not a gate input anywhere; see "RuneSweat v3.7".) `GATE.staleFrameMs`
+  (2000) — a pose frame older than this closes the gate
+  ("Pose feed frozen") even inside the grace period; raise it
   only if a healthy feed on the target device legitimately goes quiet
   for longer.
 - `STAGE` (960×540) — the fixed game aspect. Do not tie it to video size.
@@ -599,6 +599,8 @@ Built from Brandon's v3.1 playtest (71 s laptop video, frames t4–t70 in `docs/
 
 **Per-activity gate (Worker B, the sixth fix).** `GATE_ACTIVITIES`: `swing` = knees + 500 ms grace (unchanged); `refiner-carry` / `refiner-press` = shoulders + hips, 1500 ms grace; `picker` = null (no gate at all). Stale-frame rule (2000 ms) untouched. Messages name the missing landmarks. Gap, documented: `BodyState` carries shoulders/hips/knees visibility only — wrists enforced by grab logic and the press detector; literal wrist/ankle gate enforcement would need those fields added to `LandmarkVisibility` in `bodyState.ts`. Pile/hopper pulled inward (Brandon's idea): centres 0.30w / 0.70w (was 0.16/0.84), y 0.44h unchanged.
 
+**SUPERSEDED in v3.7 (Nov 5, 2026) — see "RuneSweat v3.7" below:** knees dropped from the gate everywhere, swing included; `requireKnees` deleted.
+
 **Layout (Worker B, `src/styles.css`).** Stage reserve 300px → 440px (380px fullscreen); HUD 1.15rem; buttons 1rem; `overflow-x: hidden` safety net; tagline hides under 1000px viewport height. Fit test computes from the actual CSS + `index.html` at 1728×1080, 1728×980, 1280×800, 1024×768.
 
 **Integration (`src/main.ts`, coordinator).** Applied Worker B's wiring verbatim after verifying every anchor against Worker A's edited `main.ts`: imports (`GATE` out; `gateRequirementsFor`, `shouldShowGateBanner`, `GateActivity`, `drawGateBanner` in), `gateActivity()` before `modelState()`, `gateOptions` takes `requirements: gateRequirementsFor(gateActivity())`, overlay block branches to `drawGateBanner` when `shouldShowGateBanner` says so, DOM indicator hidden while picking. Also applied Worker A's two `index.html` string changes (button → 🏠 Town, legend → "go to town / back to the activity").
@@ -674,3 +676,13 @@ Two workers in parallel, strict file ownership, coordinator integrated. Worker A
 **Verified.** 394 baseline → 431 tests, typecheck + lint clean, build OK. Version bumped to `3.6.0` (Worker B owns the bump; sed single-token, the file is minified single-line JSON). No commit, no push, no Notion touch.
 
 **Still unverified (needs a real device / Brandon).** Circle reach from his normal stance (layout proves clearance, not reach); 2 s dwell feel; pointer highlight + cursor ring on a real frame with A's hand circles; ring-vs-circle centre agreement (two smoothers).
+
+## RuneSweat v3.7 — knees dropped from the gate (Worker B, Nov 5, 2026)
+
+**Why.** Brandon's v3.6 playtest: reaching up to the top-right action circle took his knees out of frame, the gate tripped ("can't see my knees"), and the hover/dwell did nothing. His fix: knees dropped from the gate EVERYWHERE, superseding the v3.2 rule that swings keep knees. The swing only needs arms + head + chest. The fixed-node change from the same playtest is the other worker's; this section is the gate side only.
+
+**Worker B — the gate (`src/core/config.ts` `GATE` / `GATE_ACTIVITIES`, `src/core/gate.ts`, `src/core/bodyState.ts`).** Shoulders + hips only, all activities: `swing` 500 ms grace, `refiner-carry` / `refiner-press` 1500 ms grace (both unchanged — only the knee requirement went), `picker` still `null`. `GATE.requireKnees` and `GateRequirements.requireKnees` deleted; `GateRequirements` is now just `{ gracePeriodMs }`. `BodyState.bodyUsable` (no-requirements fallback) is the same shoulders + hips rule. `kneesVisible` / knee `landmarkVisibility` stay as data (HUD, duck detection), no longer gate inputs. "I can't see your knees — step back" is gone; no-body messages name shoulders / hips only. Facing check (nose-offset veto) and the swing detector untouched. `main.ts` / `refiner.ts` / `renderer.ts`: comment + sample-text updates only. Hover/dwell needed no pointer change: `main.ts` gates the pointer/dwell points on `!currentGate.gated`, so the gate opening IS the fix — proven by a test driving the chain (knees-hidden reaching body: swing gate opens, pointer hovers, confirm wrist inside the (888, 84) r36 circle, dwell fires at 2000 ms; shoulders-hidden body stays gated, hover clears, no dwell). Tests: `gate.test.ts` v3.7 block (4 new) + v3.2 block and `bodyState.test.ts` knees tests rewritten; `renderer.test.ts` banner sample text now uses the shoulders message.
+
+**Verified.** 431 baseline → 435 tests, typecheck + lint clean, build OK, zero absolute path refs in the bundle, all 5 art files in `dist/item-art/`, `3.7.0` in the built bundle. Version bumped to `3.7.0` (Worker B owns the bump; sed single-token, the file is minified single-line JSON).
+
+**Still unverified (needs a real device / Brandon).** Whether shoulders + hips at 0.5 visibility is forgiving enough on his real body when he reaches up (a real reach may dip a shoulder/hip below threshold — sandbox can't tell); whether anything else still trips on knees (grep says no in `src/`, only a real playtest proves the path); the integrated gate → hover → dwell path on a real browser (node tests only); 2 s dwell feel (carried over from v3.6).

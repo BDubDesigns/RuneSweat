@@ -598,14 +598,6 @@ export const SIM = {
   jumpRise: 0.12,
   /** How far the hips drop (normalized) while the sim is ducking. */
   duckDrop: 0.1,
-  /**
-   * Ankle spread, in torso lengths, while the sim holds the legs-wide
-   * key (X, v3.1): the star-jump detector needs >= 0.85 torso lengths
-   * (STAR_JUMP.minAnkleSpreadTorsoFrac), and the sim's standing ankles
-   * read ~0.59. 1.15 clears the line with margin without going full
-   * splits (~2.2). The real camera needs no key — real ankles move.
-   */
-  legsWideAnkleSpreadTorsoFrac: 1.15,
   /** Handedness/visibility the sim reports for every landmark. */
   visibility: 0.99,
 } as const;

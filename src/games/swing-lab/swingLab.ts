@@ -15,13 +15,19 @@
  * (Mining 5, 25 XP/hit) locked until Mining 5. Every hit drops the real
  * ore image, which flies toward the Ore counter.
  *
+ * v3.7 (Nov 5, 2026): the node is FIXED to the bottom centre of the
+ * stage (`NODE` in `core/config.ts`) — it no longer follows the
+ * body's hip centre. The player stands behind it to smack it. A
+ * misaligned body shows the hint "Step behind the node" in the HUD
+ * instruction; the hint never blocks a swing.
+ *
  * The game owns only its simulation + canvas drawing + HUD string. It
  * never touches landmarks for gameplay: the swing is decided by
  * `SwingMachine` from `BodyState` only. All tuning lives in `SWING`
  * (`core/config.ts`); tier values live in `tiers.ts`.
  */
 
-import { RENDER, STAGE, SWING } from '../../core/config';
+import { NODE, RENDER, STAGE, SWING } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
 import { assetUrl } from '../../core/assetUrl';
 import type { BodyState } from '../../core/bodyState';
@@ -95,17 +101,21 @@ function requireTier(tierId: string): MiningTier {
  * Node radii for a stage: the v3 node is bigger and wider than v2's
  * circle (v2: radius 0.15 * min(w, h) both ways, so 0.30 wide and tall).
  * v3 is an ellipse 0.44 wide x 0.34 tall (fractions of min(w, h)) — the
- * rock reads as a boulder, not a ball.
+ * rock reads as a boulder, not a ball. v3.7 keeps the size; only the
+ * position is fixed now (see `nodeGeometryForStage`).
  */
 export function nodeRadiiForStage(
   width: number,
   height: number,
 ): { rx: number; ry: number } {
   const m = Math.min(width, height);
-  return { rx: m * 0.22, ry: m * 0.17 };
+  return {
+    rx: (m * NODE.widthFracOfMin) / 2,
+    ry: (m * NODE.heightFracOfMin) / 2,
+  };
 }
 
-/** Front-center node geometry: centre + radii, canvas space. */
+/** Fixed node geometry: centre + radii, canvas space. */
 export interface NodeGeometry {
   x: number;
   y: number;
@@ -114,31 +124,56 @@ export interface NodeGeometry {
 }
 
 /**
- * Front-center node position, derived from the body's canvas hip
- * position (Nov 4, 2026 playtest redesign): the node sits directly in
- * front of the avatar at chair/waist height, so the rock you chop
- * occludes the avatar's waist and below. `x` is the hip-centre canvas
- * x; the TOP of the rock sits just below the hips (v3: the centre is
- * 1.15 radii below the hips, so the top is 0.15 radii below them — the
- * rock covers the legs more than v2 did without covering more upper
- * body; v2's top sat half a radius ABOVE the hips). No body: centred
- * on the stage, waiting for a miner.
+ * Fixed node position (v3.7): computed from the STAGE only — centre
+ * x is the stage centre, the bottom of the rock sits
+ * `NODE.bottomGapFracOfHeight` above the stage bottom. It does not
+ * take a body and does not move when the player moves: the player
+ * places themselves behind it. Same size as v3 (0.44 x 0.34 of
+ * min(w, h)), same spot a centred player saw in v3 (on a 960x540
+ * stage: centre (480, 402.3), bottom 494.1, HP pips at 520.1).
  */
-export function nodeCenterForBody(
-  body: BodyState | null,
+export function nodeGeometryForStage(
   width: number,
   height: number,
 ): NodeGeometry {
   const { rx, ry } = nodeRadiiForStage(width, height);
-  if (body === null || !body.present) {
-    return { x: width / 2, y: height * 0.62, rx, ry };
-  }
-  const hip = toCanvas(
-    { x: body.torsoX, y: body.torsoY, visibility: 1 },
-    width,
-    height,
-  );
-  return { x: hip.x, y: hip.y + ry * 1.15, rx, ry };
+  return {
+    x: width * NODE.centreXFracOfWidth,
+    y: height - ry - height * NODE.bottomGapFracOfHeight,
+    rx,
+    ry,
+  };
+}
+
+/**
+ * Hip-centre offset from the node centre, in torso lengths (signed:
+ * positive = hips to the video-right of the node, which reads as
+ * screen-left after mirroring). Null with no usable body (no body,
+ * absent, or zero torso length) — there is nothing to align. The
+ * node centre in video space is 0.5 (the mirror of 0.5 is 0.5), so
+ * the offset is just the hip's video-space distance from centre,
+ * divided by the torso length — the same normalized-space unit the
+ * swing machine and the press zones use for horizontal offsets.
+ */
+export function alignmentOffsetTorsoFrac(
+  body: BodyState | null,
+): number | null {
+  if (body === null || !body.present || body.torsoLength <= 0) return null;
+  return (body.torsoX - NODE.centreXFracOfWidth) / body.torsoLength;
+}
+
+/**
+ * Alignment hint (v3.7): "Step behind the node" when the hip centre
+ * is further than `NODE.alignThresholdTorsoFrac` sideways from the
+ * node centre, else null. Hint ONLY — the swing machine never reads
+ * this and a misaligned swing still counts.
+ */
+export function alignmentHintForBody(body: BodyState | null): string | null {
+  const offset = alignmentOffsetTorsoFrac(body);
+  if (offset === null) return null;
+  return Math.abs(offset) > NODE.alignThresholdTorsoFrac
+    ? 'Step behind the node'
+    : null;
 }
 
 /**
@@ -327,6 +362,10 @@ export interface SwingLabSnapshot {
   respawnProgress: number;
   /** Rock pieces currently falling from a broken node. */
   nodePieces: number;
+  /** Fixed node geometry (v3.7): same rect whatever the body does. */
+  node: NodeGeometry;
+  /** Alignment hint for the current body, or null when lined up / no body. */
+  alignmentHint: string | null;
 }
 
 /**
@@ -399,7 +438,7 @@ export class SwingLabGame implements Game {
   private levelBannerUntilMs = 0;
   private lastWidth: number = STAGE.width;
   private lastHeight: number = STAGE.height;
-  /** Latest body, for the front-center node position (see nodeCenter). */
+  /** Latest body, for the alignment hint (`hudHtml`, `snapshot`). */
   private lastBody: BodyState | null = null;
   private particles: Particle[] = [];
   private floaters: Floater[] = [];
@@ -659,6 +698,11 @@ export class SwingLabGame implements Game {
     if (this.snapshotFacingOk(snap) === false) {
       instruction += " Face the camera — I can't see you from the side.";
     }
+    // v3.7 alignment hint: advisory only, never a block.
+    const alignmentHint = alignmentHintForBody(this.lastBody);
+    if (alignmentHint !== null) {
+      instruction += ` ${alignmentHint}.`;
+    }
     return (
       `<span>⛏️ Mining Lv ${level} — ${xpIntoLevel(this.xp)}/${SWING.xpPerLevel} XP</span> &nbsp; ` +
       `<span>${oreImg} Ore ${this.ore} · ${tier.name}</span> &nbsp; ` +
@@ -693,6 +737,8 @@ export class SwingLabGame implements Game {
       nodeGone: this.nodeGone(this.lastNowMs),
       respawnProgress: this.respawnProgress(this.lastNowMs),
       nodePieces: this.nodePieces.length,
+      node: this.nodeCenter(),
+      alignmentHint: alignmentHintForBody(this.lastBody),
     };
   }
 
@@ -830,7 +876,7 @@ export class SwingLabGame implements Game {
   }
 
   private nodeCenter(): NodeGeometry {
-    return nodeCenterForBody(this.lastBody, this.lastWidth, this.lastHeight);
+    return nodeGeometryForStage(this.lastWidth, this.lastHeight);
   }
 
   /**

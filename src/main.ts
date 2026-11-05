@@ -1,5 +1,5 @@
 /**
- * Lara's Pose Games — hub bootstrap.
+ * RuneSweat — hub bootstrap.
  *
  * The hub owns: the camera, the pose source, the fixed-timestep loop, the
  * video/avatar rendering, and the DOM. A game owns only its own simulation
@@ -45,15 +45,11 @@ import type {
 import { MouseSource } from './sim/mouseSource';
 import { parseReplayClip, ReplaySource } from './sim/replaySource';
 import type { Game, GameConstructor } from './games/game';
-import { SpaceInvadersGame } from './games/space-invaders/spaceInvaders';
-import { DanceDropGame } from './games/dance-drop/danceDrop';
 import { SwingLabGame } from './games/swing-lab/swingLab';
 import { RefinerGame } from './games/refiner/refiner';
 import { TownHub } from './hub/townHub';
 
 const GAME_CONSTRUCTORS: Record<string, GameConstructor> = {
-  'space-invaders': SpaceInvadersGame,
-  'dance-drop': DanceDropGame,
   'swing-lab': SwingLabGame,
   // The refiner has NO hub card (it is not in GAMES): it is entered
   // from the town hub only, via openRefiner() below.
@@ -61,18 +57,14 @@ const GAME_CONSTRUCTORS: Record<string, GameConstructor> = {
 };
 
 const GAME_BLURBS: Record<string, string> = {
-  'space-invaders':
-    '🚀 Move your body to fly the ship. Raise an arm to shoot!',
-  'dance-drop': '💃 Copy the falling pose before it lands in your zone!',
   'swing-lab': '⛏️ Raise both arms overhead, then chop down to mine Ferrite Shale at The Jag!',
-  'auto-runner': '🏃 Switch lanes, jump and duck! Coming soon.',
   lumberjack: '🪓 Chop trees with your body. Coming soon.',
 };
 
 function requireElement<T extends HTMLElement>(id: string, ctor: new () => T): T {
   const el = document.getElementById(id);
   if (!(el instanceof ctor)) {
-    throw new Error(`pose-arcade: #${id} is missing from index.html`);
+    throw new Error(`runesweat: #${id} is missing from index.html`);
   }
   return el;
 }
@@ -211,7 +203,7 @@ function main(): void {
   const canvas = requireElement('stage', HTMLCanvasElement);
   const ctx = canvas.getContext('2d');
   if (ctx === null) {
-    throw new Error('pose-arcade: 2D canvas context is unavailable');
+    throw new Error('runesweat: 2D canvas context is unavailable');
   }
   const context: CanvasRenderingContext2D = ctx;
 

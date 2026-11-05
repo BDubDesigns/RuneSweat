@@ -233,16 +233,16 @@ describe('fullscreen toggle wiring', () => {
     (globalThis as unknown as Record<string, unknown>).cancelAnimationFrame =
       (): void => {};
 
-    // Play without a camera, then pick Swing Lab (3rd game card:
-    // Space Invaders, Dance Drop, Swing Lab).
+    // Play without a camera, then pick Swing Lab (1st game card:
+    // Swing Lab; Lumberjack is the disabled 2nd card).
     const btnSim = elements.get('btn-sim');
     if (btnSim === undefined) throw new Error('btn-sim missing');
     btnSim.click();
     const cards = createdElements.filter((el) =>
       el.className.startsWith('game-card'),
     );
-    expect(cards).toHaveLength(5);
-    cards[2]?.click();
+    expect(cards).toHaveLength(2);
+    cards[0]?.click();
 
     // ~1.5 s of frames: the gate opens on the sim body and the game
     // starts; the HUD shows Swing Lab.

@@ -2,6 +2,10 @@
 
 > PARKED. Not built in v1. This doc is the parking lot so the idea doesn't
 > get lost and doesn't get half-built by accident.
+>
+> RuneSweat note: this parked vision is where RuneSweat's pickaxe swing came
+> from — the chop mechanic, retargeted from trees to ore. The Lara framing
+> below is historical; RuneSweat's player is Brandon (and later, everyone).
 
 ## The dream (Brandon, Nov 4, 2026)
 

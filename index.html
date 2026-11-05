@@ -6,23 +6,24 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>Lara's Pose Games</title>
+    <title>RuneSweat</title>
   </head>
   <body>
     <!--
-      Lara's Pose Games — pose-arcade framework (PLAN.md).
+      RuneSweat — active RuneSpace: swing, carry, jump, craft, fight.
+      Your body is the controller.
 
-      Full-body skeleton pose games for a young child. The camera never
-      leaves the device: MediaPipe PoseLandmarker runs on-device, and the
-      only thing games ever see is a 33-point skeleton.
+      Full-body skeleton pose games. The camera never leaves the device:
+      MediaPipe PoseLandmarker runs on-device, and the only thing games
+      ever see is a 33-point skeleton.
 
       Mirroring rule: the canvas is never flipped with CSS `scaleX(-1)`.
       Mirroring happens in code, in `toCanvas()` (src/render/stage.ts).
     -->
     <main id="app">
       <header id="hub-header">
-        <h1>🪐 Lara's Pose Games</h1>
-        <p class="tagline">Move your body to play!</p>
+        <h1>⛏️ RuneSweat</h1>
+        <p class="tagline">Your body is the controller — swing, carry, jump, craft, fight.</p>
       </header>
 
       <section id="hub" aria-label="Choose a game">
@@ -43,7 +44,6 @@
       <section id="stage-section" hidden>
         <div class="stage-wrap">
           <canvas id="stage"></canvas>
-          <div id="stun-banner" class="banner" hidden></div>
         </div>
         <div id="game-hud" class="game-hud" aria-live="polite"></div>
         <div class="controls">
@@ -62,10 +62,9 @@
       </section>
 
       <footer id="legend">
-        <span class="k">move left / right to steer</span>
-        <span class="k">raise an arm to shoot</span>
-        <span class="k">lower it to reload</span>
-        <span class="k">no camera: hold left click = left arm, right click = right arm, Q/E = angled arms</span>
+        <span class="k">raise both arms overhead, then chop down to mine</span>
+        <span class="k"><kbd>Space</kbd> pause / town hub</span>
+        <span class="k">no camera: hold left click = left arm, right click = right arm, Q/E = angled arms, A/D = both arms up, W = jump, X = legs wide</span>
         <span class="k"><kbd>D</kbd> debug HUD</span>
         <span class="k"><kbd>V</kbd> show camera (calibration only)</span>
         <span class="k"><kbd>M</kbd> mute</span>

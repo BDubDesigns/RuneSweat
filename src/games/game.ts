@@ -4,9 +4,9 @@
  * The hub (`main.ts`) owns the camera, the pose source, the fixed-timestep
  * loop, the video/skeleton rendering and the DOM. A game owns only its own
  * simulation + its own canvas drawing + its HUD string. A game never touches
- * landmarks directly except through the `landmarks` argument (Dance Drop
- * needs raw landmarks for pose matching) and never touches the camera, the
- * loop, or the DOM.
+ * landmarks directly except through the `landmarks` argument (games that do
+ * pose matching read raw landmarks through it) and never touches the camera,
+ * the loop, or the DOM.
  *
  * Lifecycle: `start()` once when the player picks the game, `update()` on
  * every fixed step, `render()` on every displayed frame (after the video and
@@ -30,8 +30,8 @@ export interface Game {
   /**
    * Advance the simulation by exactly `dtMs`. `body` is the latest derived
    * body state, or `null` when no person is detected. `landmarks` is the
-   * latest raw pose (or `null`) — only Dance Drop reads it, for pose
-   * matching. Never called while paused.
+   * latest raw pose (or `null`) — games that do pose matching read it.
+   * Never called while paused.
    */
   update(
     dtMs: number,

@@ -2,13 +2,13 @@
  * Web Audio synth SFX — no audio files, everything is synthesized.
  *
  * One shared AudioContext, created lazily on the first user gesture (the
- * browser requires that). Mute is persisted in localStorage so a parent only
- * has to tap it once.
+ * browser requires that). Mute is persisted in localStorage so the player
+ * only has to tap it once.
  */
 
 import { AUDIO, SWING } from './config';
 
-const MUTE_STORAGE_KEY = 'pose-arcade:muted';
+const MUTE_STORAGE_KEY = 'runesweat:muted';
 
 export class SoundEffects {
   private context: AudioContext | null = null;
@@ -77,12 +77,12 @@ export class SoundEffects {
     osc.stop(t0 + durationSec + 0.02);
   }
 
-  /** Quick descending blip: a missile fired. */
+  /** Quick descending blip: a grab / pickup. */
   public shoot(): void {
     this.tone(AUDIO.shootFreqHz, AUDIO.shootEndFreqHz, AUDIO.shootDurationSec);
   }
 
-  /** Two clicks: an arm lowered, ready to fire again. */
+  /** Two clicks: an action completed, ready for the next. */
   public reload(): void {
     this.tone(AUDIO.reloadClickFreqHz, AUDIO.reloadClickFreqHz, 0.05);
     this.tone(
@@ -94,7 +94,7 @@ export class SoundEffects {
     );
   }
 
-  /** Low thud: the ship was hit. */
+  /** Low thud: a hit landed. */
   public hit(): void {
     this.tone(AUDIO.hitFreqHz, 60, AUDIO.hitDurationSec, 'sawtooth');
   }
@@ -106,7 +106,7 @@ export class SoundEffects {
     });
   }
 
-  /** Dance Drop feedback: Perfect = high chime, Good = mid, Miss = low. */
+  /** Feedback chime: high = best, mid = good, low = miss. */
   public feedback(kind: 'perfect' | 'good' | 'miss'): void {
     const freq =
       kind === 'perfect'

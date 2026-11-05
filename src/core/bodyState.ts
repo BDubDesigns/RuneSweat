@@ -312,22 +312,6 @@ export function armAngleDegRaw(
   return (Math.atan2(dx, dy) * 180) / Math.PI;
 }
 
-/**
- * Canvas-space unit direction a missile should travel for an arm at
- * `angleDeg` (video space). The mirror flips the x component: an arm
- * pointing to video-right points to canvas-left. Straight up stays up.
- */
-export function armDirectionCanvas(angleDeg: number): { x: number; y: number } {
-  const clamped = clamp(angleDeg, -BODY.maxFireAngleDeg, BODY.maxFireAngleDeg);
-  const rad = (clamped * Math.PI) / 180;
-  return { x: -Math.sin(rad), y: -Math.cos(rad) };
-}
-
-/** Is this arm raised AND extended, i.e. ready to fire? */
-export function armCanFire(arm: ArmState): boolean {
-  return arm.raised && arm.extended;
-}
-
 /** A neutral arm state (no person, or arm not visible). */
 function neutralArm(side: ArmSide): ArmState {
   return {

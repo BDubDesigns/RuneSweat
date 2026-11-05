@@ -1,4 +1,4 @@
-/* Lara's Pose Games — kid-friendly, big-target UI. */
+/* RuneSweat — big-target UI. */
 
 :root {
   color-scheme: light dark;
@@ -136,20 +136,6 @@ body {
   height: 100%;
   display: block;
   touch-action: none;
-}
-
-.banner {
-  position: absolute;
-  left: 50%;
-  top: 12px;
-  transform: translateX(-50%);
-  background: rgba(255, 93, 93, 0.9);
-  color: #fff;
-  font-weight: 800;
-  font-size: 1.2rem;
-  padding: 8px 18px;
-  border-radius: 999px;
-  white-space: nowrap;
 }
 
 .game-hud {

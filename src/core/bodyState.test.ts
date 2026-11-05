@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   armAngleDegRaw,
-  armCanFire,
-  armDirectionCanvas,
   BodyStateTracker,
   jointAngle,
   jointAngles,
@@ -29,29 +27,6 @@ describe('armAngleDegRaw', () => {
 
   it('is 90 pointing straight sideways', () => {
     expect(armAngleDegRaw(lm(0.4, 0.3), lm(0.6, 0.3))).toBeCloseTo(90, 9);
-  });
-});
-
-describe('armDirectionCanvas', () => {
-  it('points straight up for angle 0', () => {
-    const d = armDirectionCanvas(0);
-    expect(d.x).toBeCloseTo(0, 9);
-    expect(d.y).toBeCloseTo(-1, 9);
-  });
-
-  it('mirrors video-right into canvas-left', () => {
-    // An arm pointing to video-right (positive angle) points to canvas-left.
-    const d = armDirectionCanvas(30);
-    expect(d.x).toBeLessThan(0);
-    expect(d.y).toBeLessThan(0);
-    expect(Math.hypot(d.x, d.y)).toBeCloseTo(1, 9);
-  });
-
-  it('clamps to the max fire angle', () => {
-    const d = armDirectionCanvas(120);
-    const expected = armDirectionCanvas(60);
-    expect(d.x).toBeCloseTo(expected.x, 9);
-    expect(d.y).toBeCloseTo(expected.y, 9);
   });
 });
 
@@ -82,7 +57,7 @@ describe('BodyStateTracker', () => {
     expect(state.torsoLength).toBeGreaterThan(0.2);
   });
 
-  it('detects a raised straight arm as ready to fire', () => {
+  it('detects a raised straight arm', () => {
     const tracker = new BodyStateTracker();
     const state = tracker.update(
       makeFrame(makePose({ rightArmDeg: 0 }), 1000),
@@ -90,19 +65,18 @@ describe('BodyStateTracker', () => {
     expect(state.rightArm.raised).toBe(true);
     expect(state.rightArm.extended).toBe(true);
     expect(state.rightArm.angleDeg).toBeCloseTo(0, 0);
-    expect(armCanFire(state.rightArm)).toBe(true);
-    // The other arm hangs down and cannot fire.
-    expect(armCanFire(state.leftArm)).toBe(false);
+    // The other arm hangs down: not raised (a straight hanging arm is
+    // still "extended" — extended is about straightness, not height).
+    expect(state.leftArm.raised).toBe(false);
   });
 
-  it('does not let a bent raised arm fire', () => {
+  it('does not count a bent raised arm as extended', () => {
     const tracker = new BodyStateTracker();
     const state = tracker.update(
       makeFrame(makePose({ rightArmDeg: 0, rightArmBent: true }), 1000),
     );
     expect(state.rightArm.raised).toBe(true);
     expect(state.rightArm.extended).toBe(false);
-    expect(armCanFire(state.rightArm)).toBe(false);
   });
 
   it('detects an angled arm', () => {

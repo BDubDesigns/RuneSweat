@@ -10,8 +10,8 @@ describe('joinBaseUrl', () => {
   });
 
   it('joins a subpath base', () => {
-    expect(joinBaseUrl('/lara-pose-games/', 'models/x.task')).toBe(
-      '/lara-pose-games/models/x.task',
+    expect(joinBaseUrl('/RuneSweat/', 'models/x.task')).toBe(
+      '/RuneSweat/models/x.task',
     );
   });
 
@@ -22,8 +22,8 @@ describe('joinBaseUrl', () => {
   it('strips a leading slash from the relative path', () => {
     // A caller passing '/models/...' must never produce an absolute URL.
     expect(joinBaseUrl('./', '/models/x.task')).toBe('./models/x.task');
-    expect(joinBaseUrl('/lara-pose-games/', '/wasm')).toBe(
-      '/lara-pose-games/wasm',
+    expect(joinBaseUrl('/RuneSweat/', '/wasm')).toBe(
+      '/RuneSweat/wasm',
     );
   });
 

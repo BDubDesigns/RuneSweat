@@ -1,5 +1,5 @@
 /**
- * Pose tracking types for Lara's Pose Games.
+ * Pose tracking types for RuneSweat.
  *
  * These types are OURS. They deliberately do not import MediaPipe types, so
  * that `tracking/` and `sim/` stay pure and so the real tracker, the replay

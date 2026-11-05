@@ -1,11 +1,11 @@
 /**
  * Base-relative asset URLs.
  *
- * The app is hosted under a subpath on GitHub Pages (`/lara-pose-games/`),
+ * The app is hosted under a subpath on GitHub Pages (`/RuneSweat/`),
  * so asset paths must NEVER start with `/`: `/models/...` resolves to the
  * domain root and 404s there, which silently left PoseLandmarker unloaded
- * on the live site (Nov 4, 2026 playtest: no pose frames ever, Game Over
- * score 0) while everything worked on localhost at the root. Vite's
+ * on the live site (Nov 4, 2026 playtest: no pose frames ever) while
+ * everything worked on localhost at the root. Vite's
  * `base` is `'./'`, so `import.meta.env.BASE_URL` is `'./'` in the build
  * and joining it with a relative segment gives a subpath-safe URL.
  */

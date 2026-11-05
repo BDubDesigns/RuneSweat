@@ -1,10 +1,16 @@
-# Lara's Pose Games — pose-arcade
+# RuneSweat
 
-A lightweight, modular framework for full-body camera pose games for a
-young child. Space Invaders + Dance Pose Drop. Single-player practice.
+Active RuneSpace: swing, carry, jump, craft, fight — your body is the
+controller. Single-player, full-body camera pose game.
 
 **No backend, no telemetry, nothing leaves the device.** The camera feed
 goes to an on-device MediaPipe PoseLandmarker and nowhere else.
+
+> Repo split (Nov 4, 2026): this repo was split out of
+> BDubDesigns/lara-pose-games, which keeps the Lara camera games.
+> Those games are NOT in this repo.
+> RuneSweat is the active-RuneSpace game; its build log below is shared
+> history from before the split.
 
 ## Quick start
 
@@ -25,10 +31,7 @@ jump, `S` duck, `X` (hold) legs wide for star jumps. `Space` pauses (press it ag
 
 - **Swing Lab** — Active RuneSpace Mining prototype. Raise both arms overhead together, then chop down fast like a pickaxe: the Ferrite Shale node cracks, a real ore pops out and flies to the Ore counter, +15 Mining XP. Five hits break the node apart into falling pieces; a new node arrives after a 3 s progress bar and fades in. Two-handed only — a single arm gets "Both hands together!". Mine tiers follow RuneSpace: Ferrite Shale at The Jag (Mining 1, 15 XP/hit) now, Galvanite at Deep Jag (Mining 5, 25 XP/hit) locked until Mining 5 — pick a mine on the chips at the bottom-right of the stage. Ore and XP persist in a local save (see below); press `Space` to open the town hub.
 - **Town Hub + Refiner** — press `Space` (or ⏸ Pause) while mining to open the town hub: inventory with the real item art, mines open to you, and activity spots. The **Refiner** turns ore into refined materials: pick a recipe (Refined Ferrite at Refining 1, Galvanic Stock at Refining 5), grab ore from the pile with both hands, carry it to the hopper, and do 3 star jumps per batch (jump with arms wide and legs apart — in the sim: `W` + `Q`+`E` + `X`). **Bix's Shop** buys your ore and refined goods for Credits (active-game prices, not RuneSpace canon). Reset save is two-tap in the hub.
-- **Space Invaders** — move your body to fly the ship. Raise either arm to shoot a missile in the direction your arm points (straight up only if your arm is straight up). Lower your arm to reload. Enemies shoot back slowly; each level gets a little faster.
-- **Dance Pose Drop** — a stickman in a pose falls from the sky. Copy the pose when it lands in your zone. Perfect / Good / Miss.
-- **Auto Runner** — coming soon (lane switching, jump, duck).
-- **Lumberjack** — vision only, see `docs/vision-lumberjack.md`.
+- **Lumberjack** — coming soon (chop trees with your body). Vision only, see `docs/vision-lumberjack.md`.
 
 ## Playing on a phone (GitHub Pages)
 
@@ -57,7 +60,7 @@ What changed in this round:
 - **Video liveness**: the camera video is attached to the DOM hidden (opacity 0, never `display:none`, which can pause playback); the source watches `video.currentTime` and flags the video frozen if it stops advancing for 2 s (`POSE.videoFrozenMs`), retrying `play()` if the video paused.
 - **Retry Camera button**: restarts the whole camera feed from scratch (new source + new video) when the feed freezes or inference stops; the picked game stays put, gated, until a fresh usable body arrives.
 
-Still untested on a real device: whether inference actually keeps running on the Pixel during a full Swing Lab session — the duplicate-timestamp guard is the prime suspect for the freeze but is verified in code + fakes only, not on the device — what the real inference Hz and delegate are in play, whether the 2 s staleness threshold ever trips on a healthy feed, and the swing thresholds (0.6 windup, 3.0 torso/s) against a real chop.
+Still untested on a real device: whether inference actually keeps running on the Pixel during a full Swing Lab session — the duplicate-timestamp guard is the prime suspect for the freeze but is verified in code + fakes only, not on the device — what the real inference Hz and delegate are in play, whether the 2 s staleness threshold ever trips on a healthy feed, and the swing thresholds (0.7 windup, 2.5 torso/s) against a real chop.
 
 Mouse-sim (no camera): `?source=mouse`, hold **A+D** (or both mouse buttons) ~0.5s to wind up, release both at once to strike. Both hands together — a single arm gets "Both hands together!" and does not count.
 
@@ -74,7 +77,16 @@ Mouse-sim (no camera): `?source=mouse`, hold **A+D** (or both mouse buttons) ~0.
   the one `PoseFrameSource` interface, so games can't tell them apart.
 - **Tuning:** every tunable lives in `src/core/config.ts` — the single
   source of truth. See PLAN.md for the knobs you'll most likely need
-  after a playtest with Lara.
+  after a real-device playtest.
+
+## Save — do not rename the key
+
+Progress (Mining/Refining XP, ore, refined materials, Credits) persists
+in localStorage under `activersespace-save-v1` (`SAVE.key` in
+`src/core/config.ts`). The key name is a historical artifact from the
+repo this one split from — do NOT "fix" it to a runesweat name. Renaming
+it would strand live progress: the save would load as empty on the new
+URL. See the comment next to the key in `config.ts`.
 
 ## Quality gates
 
@@ -89,8 +101,8 @@ npm run preview # serve the production build
 ## Project layout
 
 See `PLAN.md` for the architecture, the model-choice trade-off
-(PoseLandmarker vs MoveNet), the auto-runner design note, and what still
-needs a real-device test with Lara.
+(PoseLandmarker vs MoveNet), the Lumberjack vision, and what still
+needs a real-device test.
 
 ## Swing Lab v2 — avatar + presentation (Nov 4, 2026)
 

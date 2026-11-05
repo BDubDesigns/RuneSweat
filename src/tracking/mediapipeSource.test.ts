@@ -10,7 +10,7 @@ import type { PoseLandmarker } from '@mediapipe/tasks-vision';
 /**
  * The Nov 4, 2026 live-site failure: model + WASM were loaded from
  * absolute paths (`/models/...`, `/wasm`), which 404 under the
- * `/lara-pose-games/` subpath on GitHub Pages while working on localhost
+ * `/RuneSweat/` subpath on GitHub Pages while working on localhost
  * at the root — so PoseLandmarker never loaded and no pose frames ever
  * arrived. These tests pin the fix: base-relative paths, never a leading
  * slash.

@@ -1,9 +1,9 @@
 /**
- * ALL tunable constants for Lara's Pose Games live in this file.
+ * ALL tunable constants for RuneSweat live in this file.
  *
- * Nothing here is measured or derived at runtime. Every knob a parent or
- * developer will tune after a playtest with Lara — arm thresholds, ship
- * speed, enemy speed, pose-match tolerance, audio — is a literal in this
+ * Nothing here is measured or derived at runtime. Every knob a
+ * developer will tune after a playtest — arm thresholds, swing
+ * velocity, pose-match tolerance, audio — is a literal in this
  * module so tuning never means hunting through game code.
  *
  * Follows the same convention as BDubDesigns/spiderman-game `src/config.ts`:
@@ -116,7 +116,7 @@ export const RENDER = {
  * sustains. Switch `variant` to `'full'` to A/B on-device.
  *
  * MoveNet was considered and rejected for v1: staying on the same MediaPipe
- * stack as the Spider-Man repo keeps 33 landmarks for dance-pose matching
+ * stack as the Spider-Man repo keeps 33 landmarks for full-body pose work
  * and one dependency to learn. See PLAN.md §"Model choice".
  *
  * Model + WASM are self-hosted under `public/` — nothing is fetched from a
@@ -171,7 +171,7 @@ export const BODY = {
   /**
    * One Euro filter tuning for the torso + arm smoothing.
    * Lower minCutoff = smoother but laggier. These are the Spider-Man repo's
-   * values; retune only after a real playtest with Lara.
+   * values; retune only after a real playtest.
    */
   oneEuroMinCutoff: 1.0,
   oneEuroBeta: 0.02,
@@ -188,8 +188,8 @@ export const BODY = {
    * lets the cutoff open a little more during the chop itself. Deliberately
    * modest: with no real-camera jitter data in the sandbox, pushing to
    * 2-3 Hz would be a guess. Torso / arm angles keep the Spider-Man
-   * values — they steer the ship and aim shots, where steadiness matters
-   * more than chop latency. See the Swing Lab v2 note in PLAN.md.
+   * values — steadiness matters more than chop latency there. See the
+   * Swing Lab v2 note in PLAN.md.
    */
   wristOneEuroMinCutoff: 1.5,
   wristOneEuroBeta: 0.05,
@@ -204,25 +204,15 @@ export const BODY = {
    * fraction of torso length. A bent raised arm (elbow folded) must not fire.
    */
   extendThresholdTorsoFrac: 0.8,
-  /**
-   * Arm angle is measured from straight up, in degrees, 0 = straight up,
-   * positive = pointing to video-right. Within this many degrees of 0 the
-   * shot is straight up; outside it, the missile follows the arm angle.
-   */
-  straightUpToleranceDeg: 12,
-  /** Hard clamp on a fired missile's angle from vertical, in degrees. */
-  maxFireAngleDeg: 60,
   /** Hip-mid must rise this far (fraction of torso length) to count as a jump. */
   jumpThresholdTorsoFrac: 0.18,
   /** Hip-mid must drop this far to count as a duck (plus knee bend). */
   duckThresholdTorsoFrac: 0.12,
   /**
    * Knee angle (degrees, 180 = straight leg) below this counts as "bent"
-   * for duck detection. A 5-year-old's squat reads around 90-120.
+   * for duck detection. A deep squat reads around 90-120.
    */
   duckKneeAngleDeg: 140,
-  /** Seconds a pose must be held inside tolerance to score in Dance Drop. */
-  poseHoldSeconds: 0.6,
   /**
    * Wrist handedness latch (bodyState.ts, v3). MediaPipe's left/right
    * wrist labels can swap when the hands meet overhead or cross, which
@@ -249,58 +239,6 @@ export const BODY = {
   wristLatchRelatchMs: 500,
   wristLatchOverwhelmTorsoFrac: 0.5,
   wristLatchMarginTorsoFrac: 0.01,
-} as const;
-
-/** Space Invaders tuning. */
-export const INVADERS = {
-  /** Ship speed is body-driven, so this is a smoothing rate, not px/s. */
-  shipFollowRate: 0.35,
-  /** Ship stays inside this x-range of the playfield (fraction of width). */
-  shipMinX: 0.06,
-  shipMaxX: 0.94,
-  missileSpeedPxPerSec: 520,
-  missileRadiusPx: 6,
-  /** Enemy bullet speed at level 1, px/s. Multiplied by level scaling. */
-  enemyBulletSpeedPxPerSec: 90,
-  /** Seconds between enemy volleys at level 1. */
-  enemyFireIntervalSec: 2.2,
-  /** Enemy descent per level-clear, in px. */
-  enemyStepDownPx: 18,
-  /** Enemy horizontal speed at level 1, px/s. */
-  enemySpeedPxPerSec: 26,
-  /** Per-level multiplier applied to enemy speed + fire rate. */
-  levelSpeedMultiplier: 1.15,
-  /** Per-level additive bump to enemy bullet speed. */
-  levelBulletSpeedAdd: 12,
-  lives: 3,
-  /** Rows x cols of the starting formation. */
-  rows: 3,
-  cols: 5,
-  /** Points per enemy ship. */
-  pointsPerEnemy: 100,
-  /** Points per cleared level. */
-  pointsPerLevel: 250,
-  /** Grace period after a hit before the next enemy bullet can hurt, in sec. */
-  hitGraceSec: 1.5,
-} as const;
-
-/** Dance Pose Drop tuning. */
-export const DANCE = {
-  /** Target stickman fall speed at the first song, px/s. */
-  fallSpeedPxPerSec: 90,
-  /** Per-round speed bump. */
-  fallSpeedAddPerRound: 12,
-  /** Height of the player's scoring zone, in px. */
-  zoneHeightPx: 140,
-  /** Pose-match score >= this counts as a match (0..1). */
-  matchThreshold: 0.72,
-  /** "Perfect" needs a score >= this AND the target centred in the zone. */
-  perfectThreshold: 0.88,
-  /** Rounds per game before the results screen. */
-  roundsPerGame: 8,
-  /** Points for Perfect / Good. */
-  pointsPerfect: 300,
-  pointsGood: 150,
 } as const;
 
 /** Face-the-camera hint (Swing Lab v2, advisory only — never a gate). */
@@ -541,7 +479,15 @@ export const BIX = {
   },
 } as const;
 
-/** Local save (`core/save.ts`). Single-player, localStorage only. */
+/**
+ * Local save (`core/save.ts`). Single-player, localStorage only.
+ *
+ * DO NOT rename the key: Brandon's live progress (Mining Lv 5, ore,
+ * credits) is stored under `activersespace-save-v1` in browsers that
+ * already played the game, and a rename would strand it — the save
+ * would load as empty on the new URL. The key name is a historical
+ * artifact of the repo it split from; it is not a bug to fix.
+ */
 export const SAVE = {
   /** Versioned key: bump the version (and the key) on a breaking change. */
   key: 'activersespace-save-v1',
@@ -554,20 +500,20 @@ export const AUDIO = {
   enabled: true,
   /** Master gain 0..1. */
   masterGain: 0.5,
-  /** Shoot: quick descending blip. */
+  /** Quick descending blip. */
   shootFreqHz: 880,
   shootEndFreqHz: 220,
   shootDurationSec: 0.12,
-  /** Reload: two clicks, 90 ms apart. */
+  /** Two clicks, 90 ms apart. */
   reloadClickFreqHz: 1200,
   reloadGapSec: 0.09,
-  /** Hit: low thud. */
+  /** Low thud. */
   hitFreqHz: 140,
   hitDurationSec: 0.25,
-  /** Win jingle: ascending notes. */
+  /** Ascending jingle: level clear / game won. */
   winNotesHz: [523, 659, 784, 1047],
   winNoteSec: 0.12,
-  /** Dance Drop: Perfect / Good / Miss. */
+  /** Feedback chime: high / mid / low. */
   perfectFreqHz: 1047,
   goodFreqHz: 784,
   missFreqHz: 220,
@@ -625,10 +571,7 @@ export const CAMERA = {
 
 /** Game registry for the hub. `enabled: false` games show as "Coming soon". */
 export const GAMES = {
-  spaceInvaders: { id: 'space-invaders', title: 'Space Invaders', enabled: true },
-  danceDrop: { id: 'dance-drop', title: 'Dance Pose Drop', enabled: true },
   swingLab: { id: 'swing-lab', title: 'Swing Lab', enabled: true },
-  autoRunner: { id: 'auto-runner', title: 'Auto Runner', enabled: false },
   lumberjack: { id: 'lumberjack', title: 'Lumberjack', enabled: false },
 } as const;
 

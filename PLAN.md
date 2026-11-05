@@ -1,16 +1,29 @@
-# Lara's Pose Games — PLAN
+# RuneSweat — PLAN
 
-A lightweight, modular framework for full-body camera pose games for a
-5-year-old. Working name: **pose-arcade**. Single-player practice first.
-No backend, no telemetry, nothing leaves the device.
+Active RuneSpace: swing, carry, jump, craft, fight — your body is the
+controller. Single-player first. No backend, no telemetry, nothing
+leaves the device.
+
+> Repo split (Nov 4, 2026): this repo was split out of
+> BDubDesigns/lara-pose-games. The Lara camera games live there and are
+> NOT in this repo. The build log below is shared history from before
+> the split — the v1 path bug, the freeze fix, and the Swing Lab v2/v3/
+> v3.1 rounds all happened in this codebase and are RuneSweat's history
+> too. Live at bdubdesigns.github.io/RuneSweat/.
 
 ## Why this exists
 
 The Nov 3, 2026 motion-detection Bubble Pop was liked by Brandon but NOT
 by Lara. Pivot (Nov 4, 2026): full-body skeleton pose — whole body, not
-hand-only, not motion detection. The games must pick *her* out of the frame
-and use *her* movements. Accuracy only needs to be good enough for a child
-playing in a living room, not for measurement.
+hand-only, not motion detection. The games must pick the player out of
+the frame and use their movements. Accuracy only needs to be good enough
+for a living room, not for measurement.
+
+The Lara games shipped in v1 on that framework; Swing Lab — the Active
+RuneSpace Mining prototype — became the first slice of RuneSweat, and
+on Nov 4, 2026 Brandon split the repos: the Lara games stay in
+lara-pose-games, parked; this repo is RuneSweat, and Swing Lab + town
+hub + refiner are its Slice 1 / 1.5.
 
 ## Model choice (searched Nov 4, 2026)
 
@@ -30,17 +43,17 @@ switchable to FULL in `config.ts` (`POSE.variant`) for on-device A/B.**
   returns the latest result).
 
 **MoveNet was considered and rejected for v1 — Brandon's decision, Nov 4,
-2026: finish the MediaPipe PoseLandmarker v1 first, test it with Lara on
+2026: finish the MediaPipe PoseLandmarker v1 first, test it on
 the Pixel, and add MoveNet later as a second engine.** Staying on the same
 MediaPipe stack as the Spider-Man repo keeps one dependency to learn and
-33 landmarks for dance-pose matching (MoveNet's 17 points are coarser for
+33 landmarks for full-body pose work (MoveNet's 17 points are coarser for
 joint-angle scoring). MoveNet's trade-off for later: it is lighter/faster
 and may sustain a higher inference rate on the Pixel, at the cost of fewer
 landmarks (no hand points, coarser elbows/knees) and a second engine to
 maintain. When it lands, it lands as a second `PoseFrameSource`
 implementation behind a config flag, with no game-code changes — games
 only ever see `BodyState`, so the engine is swappable by construction.
-Revisit only after the MediaPipe v1 playtest with Lara.
+Revisit only after the MediaPipe v1 playtest.
 
 ## Prior art followed
 
@@ -72,19 +85,21 @@ src/
                stickman-in-rect)
   debug/       hud.ts (FPS, inference Hz, torsoX, arm angles, pose match)
   games/       game.ts (the Game interface — one contract per game)
-               space-invaders/  Game 1 — shipped in v1
-               dance-drop/      Game 2 — shipped in v1
-               auto-runner/     STUB ONLY — design below, not built
+               swing-lab/    Slice 1 — Active RuneSpace Mining
+               refiner/      Slice 1.5 — Refining (entered from the town hub)
+  hub/         townHub.ts (manual-pause overlay: inventory, mines, Refiner,
+               Bix's shop)
   main.ts      hub (game select, source select, loop wiring, input)
 ```
 
 **Rules:**
-- Games never touch landmark indices — they read `BodyState` (Dance Drop
-  excepted: it reads raw landmarks only through `poseMatchScore()`).
+- Games never touch landmark indices — they read `BodyState`.
+  Raw landmarks reach a game only through the `landmarks` argument,
+  for pose matching.
 - `z` is never used for screen position.
 - `config.ts` is the only place tunables live. Tuning after a playtest
   means editing one file.
-- DRY / SSOT: pose math lives in `bodyState.ts` once; both games reuse it.
+- DRY / SSOT: pose math lives in `bodyState.ts` once; all games reuse it.
   There is no duplicated pose code between games.
 
 ## The 33 landmarks (named in `poseTypes.ts`, never raw numbers)
@@ -94,39 +109,11 @@ src/
 points, 23 left hip, 24 right hip, 25 left knee, 26 right knee, 27 left
 ankle, 28 right ankle, 29-32 feet.
 
-## Game 1 — Space Invaders (v1, shipped)
-
-- Ship x follows smoothed `torsoX`, clamped to the playfield.
-- Either arm works. On the rising edge of an arm becoming raised+extended,
-  fire ONE missile at that arm's angle: straight up only if the arm is
-  within `BODY.straightUpToleranceDeg` (12°) of vertical, otherwise angled
-  (clamped to `BODY.maxFireAngleDeg`, 60°). While the arm stays up, no
-  refire. Lowering the arm below the shoulder reloads (reload sound, HUD
-  "Reloaded!"), then it can fire again.
-- Enemies in rows, slow enemy bullets the player can dodge by moving.
-  Each level a little faster (`INVADERS.levelSpeedMultiplier` 1.15x speed,
-  +12 px/s bullet speed per level). Score, 3 lives, level clear / game over,
-  pause/restart, big kid-friendly HUD.
-
-## Game 2 — Dance Pose Drop (v1, shipped)
-
-- A target stickman in a pose falls from the top; the player's live
-  stickman is drawn alongside (video + skeleton). When the target reaches
-  the player's zone, score it if the player's pose matches within
-  tolerance held ~0.6 s (`BODY.poseHoldSeconds`).
-- Poses: arms up, T-pose, hands on hips, one arm up, star jump.
-  Guitar-Hero-style timing feedback: Perfect / Good / Miss.
-- Reuses the same `PoseSource`, `BodyState`, pose-match, renderer and
-  audio as Game 1 — no duplicated pose code.
-- Pose templates are built procedurally (`buildPoseTemplate`) and the
-  target joint angles come from `jointAngles(template)` — the drawing and
-  the scoring can never disagree.
-
 ## Playtest failure — Nov 4, 2026, and the framework fixes
 
-Brandon playtested Space Invaders on his Pixel phone (front camera,
+Brandon playtested the v1 hub on his Pixel phone (front camera,
 portrait) from the live GitHub Pages site: body never detected, Game Over,
-score 0, ship never moved, arms never fired.
+score 0 — no input ever registered.
 
 **First diagnosis: wrong.** The screenshots looked like a selfie close-up,
 so the first theory was "face only, no hips/knees in frame". Brandon
@@ -136,11 +123,12 @@ in code or copy.
 
 **Real root cause: a base-path bug.** The code loaded the pose model and
 WASM from absolute paths (`/models/...`, `/wasm`). On GitHub Pages the app
-lives at `/lara-pose-games/`, so `/models` resolves to the domain root and
-404s (verified: 404 at `bdubdesigns.github.io/models/...`, 200 under
-`/lara-pose-games/models/...`). PoseLandmarker never loaded on the live
-site — no pose frames ever — while localhost at root worked fine, so
-tests/builds never caught it. Fixes, all in this repo now:
+lived at `/lara-pose-games/` at the time (now `/RuneSweat/`), so `/models`
+resolves to the domain root and 404s (verified: 404 at
+`bdubdesigns.github.io/models/...`, 200 under the subpath).
+PoseLandmarker never loaded on the live site — no pose frames ever —
+while localhost at root worked fine, so tests/builds never caught it.
+Fixes, all in this repo now:
 
 - `src/core/assetUrl.ts`: `assetUrl(rel)` joins
   `import.meta.env.BASE_URL` (Vite base `'./'`). Model + WASM paths are
@@ -259,7 +247,7 @@ inference Hz and delegate in play; whether 2000 ms ever trips on a
 healthy feed; the swing thresholds (0.6 windup, 3.0 torso/s) against a
 real chop.
 
-## Game 3 — Swing Lab (Active RuneSpace Mining prototype, Slice 1)
+## Swing Lab (Active RuneSpace Mining prototype, Slice 1)
 
 - One ore node, one mechanic: a pickaxe swing is a hit. Raise both arms
   overhead (windup), chop down fast through chest level (strike). The
@@ -287,29 +275,16 @@ real chop.
   the shoulder, strike line 0.5 below the shoulder (chest level), strike
   velocity 3.0 torso lengths/sec (measured: mouse-sim drop peaks ~7.8,
   a slow 1.5 s lower reads ~1.4). No elbow-extension requirement — a
-  bent-arm swing from a 5-year-old still counts.
-- Lara games are PARKED (Brandon, Nov 4): Swing Lab is the Active
-  RuneSpace first slice, not a Lara game. Space Invaders / Dance Drop are
-  still in the hub and still work, but no new work goes into them.
+  bent-arm swing still counts. (v3 moved the strike line to 0.7 and the
+  velocity to 2.5; see the v3 notes below.)
+- Repo split (Brandon, Nov 4): the Lara games moved to
+  BDubDesigns/lara-pose-games in the split; this repo is RuneSweat now,
+  and Swing Lab is its first slice. No new work goes into the Lara games
+  from here.
 
 ## Not in v1 (documented only)
 
-### Auto Runner (stub + design note)
-
-Registered in the hub as "Coming soon"; `src/games/auto-runner/` holds a
-stub implementing the `Game` interface. Design for the real build:
-
-- Three lanes; torso left/centre/right selects the lane (torsoX thirds,
-  with hysteresis so a wobbling child doesn't flicker lanes).
-- Obstacles scroll toward the player; jump = hip rise above baseline
-  (`BODY.jumpThresholdTorsoFrac`), duck = hip drop + knee bend
-  (`BODY.duckKneeAngleDeg`). Both already derived in `BodyState` — the
-  runner only needs to read them.
-- Level = a sequence of obstacle patterns ending in a finish line; speed
-  scales like Invaders. No lives lost for a "close" dodge — keep it kind
-  for a 5-year-old: a hit costs the run's combo, not the run.
-
-### Lumberjack / active RuneScape (vision only — see docs/vision-lumberjack.md)
+### Lumberjack / active RuneSpace (vision only — see docs/vision-lumberjack.md)
 
 Swing your body like chopping a tree to control a cute lumberjack SVG:
 chop = torso twist + arm swing, XP + wood per chop, whittle/craft with
@@ -321,23 +296,17 @@ parking lot for the idea.
 
 All in `src/core/config.ts`:
 - `BODY.raiseThresholdTorsoFrac` (0.25) — how high the wrist must go to
-  count as "raised". Lower if Lara's raises aren't registering.
+  count as "raised". Lower if raises aren't registering.
 - `BODY.extendThresholdTorsoFrac` (0.8) — how straight the arm must be to
-  fire. Lower if bent-arm raises should count.
-- `BODY.straightUpToleranceDeg` (12) — how close to vertical counts as
-  straight up. Widen if angled shots fire when she means straight.
-- `BODY.oneEuroMinCutoff` / `oneEuroBeta` — ship smoothness vs lag.
+  count as extended. Lower if bent-arm raises should count.
+- `BODY.oneEuroMinCutoff` / `oneEuroBeta` — smoothing vs lag.
 - `POSE.variant` ('lite' | 'full') — A/B the model on the Pixel.
-- `INVADERS.enemyBulletSpeedPxPerSec` (90) / `enemyFireIntervalSec`
-  (2.2) / `levelSpeedMultiplier` (1.15) — difficulty.
-- `DANCE.matchThreshold` (0.72) / `perfectThreshold` (0.88) — how strict
-  pose matching is. Lower `matchThreshold` first if poses feel
-  unmatchable.
-- `SWING.strikeVelocityTorsoFracPerSec` (3.0) / `windupHeightTorsoFrac`
+- `SWING.strikeVelocityTorsoFracPerSec` (2.5) / `windupHeightTorsoFrac`
   (0.6) — the two swing numbers to tune first after a phone playtest.
   Lower the velocity if real chops don't register; lower the windup
-  height if a 5-year-old can't reach it. `SWING.cooldownMs` (700) — one
+  height if shorter players can't reach it. `SWING.cooldownMs` (700) — one
   swing = one hit; shorten only if the game feels sluggish between swings.
+  `SWING.strikeLineTorsoFrac` (0.7) — how low the chop must finish.
 - `GATE.gracePeriodMs` (500) — how long a lost pose is tolerated before
   the game pauses. `GATE.requireKnees` (true) — knees are required for
   full-body swing games; set false only if a game genuinely doesn't need
@@ -350,8 +319,8 @@ All in `src/core/config.ts`:
 
 ## Quality gates (same as the Spider-Man repo)
 
-- `npm test` — vitest, unit tests for arm-angle math, reload state
-  machine, ship mapping/clamping, pose-match scoring, level scaling.
+- `npm test` — vitest, unit tests for arm-angle math, swing machine,
+  star-jump detection, refiner machine, save/inventory, hub wiring.
 - `npm run typecheck` — `tsc --noEmit`, strict.
 - `npm run lint` — type-aware ESLint, zero warnings.
 - `npm run build` — typecheck + vite build.
@@ -359,11 +328,11 @@ All in `src/core/config.ts`:
 
 ## Remaining human test (cannot be verified in this sandbox)
 
-Real-camera feel on the Pixel 10 Pro XL with Lara: arm-raise thresholds
-for a 5-year-old's arms, ship responsiveness, inference Hz on-device,
-whether the lite model holds her in frame while she moves fast, and
-whether the dance poses read as fun or frustrating. Tune from
-`config.ts` after that session — that's what it's for.
+Real-camera feel on the Pixel 10 Pro XL: arm-raise thresholds,
+inference Hz on-device, whether the lite model holds the player in
+frame while they move fast, and whether the swing thresholds read
+right on a real chop. Tune from `config.ts` after that session —
+that's what it's for.
 
 **Swing Lab phone test (Brandon, first):** stand back so head-to-knees
 fit in frame; wait for the green "✅ Body found" indicator. Raise both
@@ -372,9 +341,9 @@ down fast. A hit cracks the node, +1 ore, +10 XP. Five hits break the
 node; ten hits reach Mining Lv 2. "Swing bigger!" = wrists didn't reach
 windup height; "Swing faster!" = dropped slowly instead of chopping.
 Still untested on camera: swing thresholds (0.6 windup, 3.0 torso/s
-velocity), One-Euro lag at ~9 Hz inference, and adult vs 5-year-old
-differences. Render code (canvas drawing) is untested in Node — it
-typechecks and builds, but the first visual check needs a browser.
+velocity), One-Euro lag at ~9 Hz inference. Render code (canvas drawing)
+is untested in Node — it typechecks and builds, but the first visual
+check needs a browser.
 
 **Swing Lab phone retest (after the Nov 4 freeze round):** the gate now
 pauses on a frozen feed ("Pose feed frozen — tap Retry") and requires
@@ -406,7 +375,7 @@ colour, pattern `hearts`/`plain`, pattern colour), `skin` (tone), `hat`
 (style `hard-hat`/`none`, colour). `resolveOutfit(partial)` swaps
 whole slots and keeps the rest at the default. Default: white tank top,
 red heart-pattern boxers, yellow hard hat — Brandon's Nov 4 redesign
-(reference frames in `docs/playtest-nov4/`).
+(reference frames live in the lara-pose-games repo, not here).
 
 **Node + pickaxe (`src/games/swing-lab/swingLab.ts`).** The node is
 front-center at waist height: `nodeCenterForBody(body, w, h)` puts `x`
@@ -499,8 +468,7 @@ retest. Canvas drawing is covered only by a stub-context smoke test
   new machine + new sim, only the wrist params varying:
   release-to-hit 352 -> 256 ms (300 ms hold), 368 -> 256 ms (500 ms
   hold); peak velocity 6.65 -> 9.59, 8.07 -> 10.84 torso/s. Full suite
-  green, so no Space Invaders / Dance Drop regression from the shared
-  BODY change.
+  green, so no regression from the shared BODY change.
 
 ### Mouse sim clasp (`mouseSource.ts`)
 - Both arms straight up together (A+D or both buttons) latch a clasp:
@@ -533,7 +501,7 @@ Second playtest (Brandon, Nov 4, ~4:30 PM, laptop, 77 s video): Lv 5, 43 swings,
 
 **Node geometry (`swingLab.ts`: `nodeRadiiForStage`, `nodeCenterForBody`).** v3 is an ellipse: rx 0.22, ry 0.17 of the smaller stage dimension (v2 was a 0.15 circle — 0.30 wide/tall; v3 is 0.44 wide x 0.34 tall). The centre sits 1.15 radii below the hips, so the TOP of the rock is 0.15 radii BELOW the hips (v2's top sat half a radius above them) — wider and lower, legs covered more, upper body covered less. No body: stage centre (0.62 height). `nodeCenterForBody` now returns `{x, y, rx, ry}` (`NodeGeometry`).
 
-**RuneSpace look + art (`public/item-art/`, `swingLab.ts`).** The rock face is the real RuneSpace `boulder.webp`, copied from `~/workspace/runespace-local/public/item-art/` (main ba93790) into `lara-pose-games/public/item-art/`, cover-fit into the node ellipse and clipped to it. The active tier's ore crystals are drawn embedded in the rock face in the tier's colour (Ferrite Shale rusty orange `#d97b3f`, Galvanite bright silver `#d7dde6`, sampled from the real art). A drawn-rock fallback covers the art-not-loaded case; a failed load never shows a broken image. Art is preloaded once in the game constructor via `assetUrl` (base-relative, never a leading slash — the Nov 4 path bug). Cracks (1 per hit, max 3) get thicker and the rock darkens per hit so the stages read; HP pips stay.
+**RuneSpace look + art (`public/item-art/`, `swingLab.ts`).** The rock face is the real RuneSpace `boulder.webp`, copied from `~/workspace/runespace-local/public/item-art/` (main ba93790) into this repo's `public/item-art/`, cover-fit into the node ellipse and clipped to it. The active tier's ore crystals are drawn embedded in the rock face in the tier's colour (Ferrite Shale rusty orange `#d97b3f`, Galvanite bright silver `#d7dde6`, sampled from the real art). A drawn-rock fallback covers the art-not-loaded case; a failed load never shows a broken image. Art is preloaded once in the game constructor via `assetUrl` (base-relative, never a leading slash — the Nov 4 path bug). Cracks (1 per hit, max 3) get thicker and the rock darkens per hit so the stages read; HP pips stay.
 
 **Tiers (`src/games/swing-lab/tiers.ts`).** Sourced from RuneSpace `game/config/balance.ts` (main ba93790, mining `sources`): Ferrite Shale — The Jag, `requiredMiningLevel` 1, `successXp` 15; Galvanite — Deep Jag, `requiredMiningLevel` 5, `successXp` 25. Level curve stays Swing Lab's own (100 XP/level, `SWING.xpPerLevel`). `MINING_TIERS` is the table; `tierById`, `tierUnlocked`, `tierLockMessage` are the only accessors; adding a tier is a data-only change (one entry: id, name, location, level, XP, ore image, crystal colour). The game holds `activeTier`, starts on Ferrite Shale, and `selectTier(id, nowMs)` refuses locked/unknown tiers (locked shows the "Unlocks at Mining 5 — Deep Jag" floater) and resets the node on a switch. XP per hit is the tier's `successXp`, wired at the scoring layer in `applyEvent` — the swing machine's API is untouched, and `SWING.xpPerHit` (10) is now unused by Swing Lab. The selector is two canvas-drawn chips bottom-right (`drawTierChips`, `pointerDownAt` + the game's own canvas `pointerdown` listener); the hub owns no tier UI. Known wart: tapping a chip in mouse-sim also moves the sim body to the tap point (the hub's canvas pointer handler fires too) — harmless, the body follows the mouse back on the next move.
 

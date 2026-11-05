@@ -384,6 +384,26 @@ describe('drawActionButton + drawPointerCursor (v3.6)', () => {
     ).toBe(true);
   });
 
+  it('drawPointerCursor: showDot=false draws the ring without the centre dot (v3.7 menu cursor)', () => {
+    const rec = actionRecordingContext();
+    // Ring only: the L circle carries its 'L' label at the centre on
+    // the menu, and the dot would sit on top of the letter.
+    drawPointerCursor(rec.ctx, 500, 200, 20, false, false);
+    expect(
+      rec.arcs.some((a) => a.x === 500 && a.y === 200 && a.r === 26),
+    ).toBe(true);
+    expect(
+      rec.arcs.some((a) => a.x === 500 && a.y === 200 && a.r === 4),
+    ).toBe(false);
+    // Default (and explicit true) still draws the dot — activities
+    // keep exactly the v3.6 cursor.
+    const recDot = actionRecordingContext();
+    drawPointerCursor(recDot.ctx, 500, 200, 20, false);
+    expect(
+      recDot.arcs.some((a) => a.x === 500 && a.y === 200 && a.r === 4),
+    ).toBe(true);
+  });
+
   it('drawHoverRing: bright gold stroke just outside the rect', () => {
     const rec = actionRecordingContext();
     drawHoverRing(rec.ctx, { x: 160, y: 140, w: 640, h: 96 });

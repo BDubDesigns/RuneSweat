@@ -39,7 +39,7 @@
  * real-device playtest.
  */
 
-import { AVATAR, OUTFIT, type AvatarOutfit } from '../core/config';
+import { AVATAR, OUTFIT, RENDER, type AvatarOutfit } from '../core/config';
 import { OneEuroFilter2D } from '../core/oneEuro';
 import {
   PoseLandmark,
@@ -185,6 +185,47 @@ export function handCircleGeometry(joints: AvatarJoints): {
   return {
     left: { centre: joints.leftWrist, r },
     right: { centre: joints.rightWrist, r },
+  };
+}
+
+/**
+ * Label on a menu hand circle (v3.7): 'L' / 'R', centred in the
+ * circle, bold, sized to the circle radius. The cap height of a bold
+ * capital at font size `r` is ~0.7r, so the letter fills the circle
+ * without touching its edge at any body distance — the label scales
+ * with the circle because it IS a fraction of it. Colour is the
+ * face-feature dark, which reads on the skin fill.
+ *
+ * Menu-only: the in-game circles (`drawHandCircle`) carry no label —
+ * activities keep exactly the v3.6 look, and the label lives only on
+ * the menu cursors drawn by `AvatarRenderer.drawHandCursors`.
+ */
+export const HAND_CIRCLE_LABEL_COLOR = '#26221f';
+/** Label font size, as a fraction of the hand-circle radius. */
+export const HAND_CIRCLE_LABEL_FONT_RADIUS_FRAC = 1;
+
+/** Canvas-space label for one hand circle: what + where + how big. */
+export interface HandCircleLabelGeometry {
+  text: 'L' | 'R';
+  x: number;
+  y: number;
+  fontPx: number;
+}
+
+/**
+ * Pure: the label for one hand circle. Centred on the circle centre
+ * — the letter rides the wrist exactly like the circle does, so it
+ * can never drift off the hand it names.
+ */
+export function handCircleLabelGeometry(
+  circle: HandCircleGeometry,
+  label: 'L' | 'R',
+): HandCircleLabelGeometry {
+  return {
+    text: label,
+    x: circle.centre.x,
+    y: circle.centre.y,
+    fontPx: circle.r * HAND_CIRCLE_LABEL_FONT_RADIUS_FRAC,
   };
 }
 
@@ -636,6 +677,72 @@ export class AvatarRenderer {
     this.drawArm(ctx, sm, 'right', limbW, resolved.skin.tone);
     this.drawHead(ctx, sm, headR, resolved);
     ctx.restore();
+  }
+
+  /**
+   * Menu hand cursors (v3.7): BOTH hand circles, labelled, and
+   * nothing else — no torso, no head, no limbs. For menu screens
+   * where the full avatar is not drawn (the Town Hub): the two
+   * circles ARE the cursor there, so the player can always see
+   * where both hands are. Same circles as in-game
+   * (`handCircleGeometry`, same fill/outline via `drawHandCircle`),
+   * so the menu circles and the in-game circles can never disagree
+   * about where a hand is; the only addition is the 'L' / 'R'
+   * label centred in each circle. Uses the same per-joint smoothing
+   * as `draw()`, so the circles track exactly like the in-game
+   * ones. No body: draws nothing and resets the smoothing state.
+   */
+  public drawHandCursors(
+    ctx: CanvasRenderingContext2D,
+    landmarks: readonly NormalizedLandmark[] | null,
+    width: number,
+    height: number,
+    outfit: AvatarOutfit = OUTFIT,
+    nowMs = 0,
+  ): void {
+    if (landmarks === null) {
+      this.reset();
+      return;
+    }
+    const joints = avatarJoints(landmarks, width, height);
+    if (joints === null) {
+      this.reset();
+      return;
+    }
+    const tSeconds = nowMs / 1000;
+    const sm = this.smooth(joints, tSeconds);
+    const resolved = resolveOutfit(outfit);
+    const circles = handCircleGeometry(sm);
+    ctx.save();
+    this.drawHandCircle(
+      ctx,
+      circles.left.centre,
+      circles.left.r,
+      resolved.skin.tone,
+    );
+    this.drawHandCircleLabel(ctx, circles.left, 'L');
+    this.drawHandCircle(
+      ctx,
+      circles.right.centre,
+      circles.right.r,
+      resolved.skin.tone,
+    );
+    this.drawHandCircleLabel(ctx, circles.right, 'R');
+    ctx.restore();
+  }
+
+  /** 'L' / 'R' centred in a hand circle (v3.7, menu cursors only). */
+  private drawHandCircleLabel(
+    ctx: CanvasRenderingContext2D,
+    circle: HandCircleGeometry,
+    label: 'L' | 'R',
+  ): void {
+    const geometry = handCircleLabelGeometry(circle, label);
+    ctx.font = `700 ${geometry.fontPx}px ${RENDER.gameFont}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = HAND_CIRCLE_LABEL_COLOR;
+    ctx.fillText(geometry.text, geometry.x, geometry.y);
   }
 
   /** Smooth every joint through its own One Euro filter. */

@@ -361,6 +361,11 @@ function drawHousesIcon(
  * the same position the detectors use. A's circle centre is the
  * avatar's own smoothed wrist; the two smoothers track the same
  * wrist, so the ring and the circle stay on top of each other.
+ *
+ * `showDot` (v3.7): the centre dot is skipped on the menu, where
+ * the L circle carries its 'L' label at the centre — the dot would
+ * sit on top of the letter. In activities the circles have no
+ * labels, so the dot stays.
  */
 export const POINTER_CURSOR = {
   /** Ring sits this far outside the hand circle. */
@@ -378,6 +383,7 @@ export function drawPointerCursor(
   y: number,
   handRadiusPx: number,
   hovering: boolean,
+  showDot = true,
 ): void {
   ctx.save();
   ctx.strokeStyle = hovering
@@ -398,10 +404,12 @@ export function drawPointerCursor(
     Math.PI * 2,
   );
   ctx.stroke();
-  ctx.fillStyle = ACTION_BUTTON_STYLE.border;
-  ctx.beginPath();
-  ctx.arc(x, y, POINTER_CURSOR.dotRadiusPx, 0, Math.PI * 2);
-  ctx.fill();
+  if (showDot) {
+    ctx.fillStyle = ACTION_BUTTON_STYLE.border;
+    ctx.beginPath();
+    ctx.arc(x, y, POINTER_CURSOR.dotRadiusPx, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 

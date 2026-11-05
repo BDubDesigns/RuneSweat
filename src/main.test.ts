@@ -600,5 +600,70 @@ describe('fullscreen toggle wiring', () => {
     expect(hudText()).toContain('Mining Lv');
     expect(pauseLabel()).toBe('⛏ Back to the mine');
   });
+
+  it('both hands are the cursor in town (v3.7): L + R circles, L hovers, R dwells to confirm', () => {
+    // State carried from the previous test: town open from the
+    // refiner (Swing Lab restored), pause says '⛏ Back to the mine'.
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    // The most recent 'L' / 'R' label drawn on the canvas (the
+    // labels are drawn every frame, so the last one is the live
+    // hand position); null when the label was never drawn.
+    const lastLabel = (text: string): { x: number; y: number } | null => {
+      const hits = stage.drawCalls.filter(
+        (c) => c.method === 'fillText' && c.args[0] === text,
+      );
+      const last = hits[hits.length - 1];
+      if (last === undefined) return null;
+      return { x: last.args[1] as number, y: last.args[2] as number };
+    };
+
+    // Both circles are drawn on the hub — always, not only while
+    // hovering — and the avatar is still not drawn there: no
+    // ellipses (feet/head) while town is open.
+    stage.drawCalls.length = 0;
+    driveFrames(2);
+    expect(stage.drawCalls.map((c) => c.method)).not.toContain('ellipse');
+    expect(lastLabel('L')).not.toBeNull();
+    expect(lastLabel('R')).not.toBeNull();
+
+    // Point at the Refiner button with the mouse: the left (pointer)
+    // hand follows onto it and the button lights — the L circle is
+    // the pointer here, not just a decoration.
+    stage.fillStyles.length = 0;
+    dispatchCanvasPointerMove(714, 244);
+    driveFrames(20);
+    expect(stage.fillStyles).toContain('#ffe08a');
+    const l = lastLabel('L');
+    expect(l).not.toBeNull();
+    if (l !== null) {
+      expect(Math.hypot(l.x - 714, l.y - 244)).toBeLessThan(40);
+    }
+    // The R circle is drawn too, at the resting right hand — far
+    // from the pointer, so the two hands are not one blob.
+    const rRest = lastLabel('R');
+    expect(rRest).not.toBeNull();
+    if (l !== null && rRest !== null) {
+      expect(Math.hypot(rRest.x - l.x, rRest.y - l.y)).toBeGreaterThan(40);
+    }
+
+    // Hold C: the right (confirm) hand travels to the top-right
+    // action circle — the R circle rides along — and the ~2 s dwell
+    // fires OK on the highlighted Refiner button: town closes and
+    // the refiner opens, all by hand, no tap.
+    dispatchDocumentEvent('keydown', { key: 'c', repeat: false });
+    driveFrames(60);
+    const rDwell = lastLabel('R');
+    expect(rDwell).not.toBeNull();
+    if (rDwell !== null) {
+      expect(Math.hypot(rDwell.x - 888, rDwell.y - 84)).toBeLessThan(40);
+    }
+    driveFrames(140);
+    dispatchDocumentEvent('keyup', { key: 'c' });
+    driveFrames(3);
+    expect(hudText()).toContain('Refining Lv');
+    expect(pauseLabel()).toBe('🏠 Town');
+  });
 });
 });

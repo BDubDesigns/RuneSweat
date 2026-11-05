@@ -554,12 +554,17 @@ function main(): void {
       const handRadiusPx = handCircleRadiusPx(
         (latestBody?.torsoLength ?? SIM.torsoLength) * canvas.height,
       );
+      // Ring-only on the hub (v3.7): the L circle carries its 'L'
+      // label at the centre, and the pointer dot would sit on top
+      // of the letter. In activities the circles have no labels,
+      // so the dot stays.
       drawPointerCursor(
         ctx,
         lastPointerPoint.x,
         lastPointerPoint.y,
         handRadiusPx,
         pointer.hoveredSelectable !== null,
+        !townHub.isOpen,
       );
     }
   }
@@ -1231,6 +1236,20 @@ function main(): void {
       // gate state stays current while the player is in town.
       if (townHub.isOpen) {
         townHub.render(context, nowMs);
+        // Menu hand cursors (v3.7): both hands, labelled, on top of
+        // town — the avatar is not drawn here, so the two circles
+        // ARE the cursor on the menu. Drawn before the pointer UI so
+        // the action circle + pointer ring sit on top, exactly as
+        // the hand circles sit under the pointer UI in activities.
+        // No body yet: draws nothing (same as the avatar in-game).
+        avatar.drawHandCursors(
+          context,
+          latestLandmarks,
+          canvas.width,
+          canvas.height,
+          OUTFIT,
+          nowMs,
+        );
         // Pointer UI on top of town: the action circle (ok mode
         // while hovering) + the pointer cursor.
         drawPointerUI(context, nowMs);

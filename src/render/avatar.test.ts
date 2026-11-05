@@ -20,9 +20,12 @@ import {
   bottomsGeometry,
   faceGeometry,
   forearmEndPoint,
+  HAND_CIRCLE_LABEL_COLOR,
+  HAND_CIRCLE_LABEL_FONT_RADIUS_FRAC,
   HAND_CIRCLE_OUTLINE,
   HAND_CIRCLE_RADIUS_TORSO_FRAC,
   handCircleGeometry,
+  handCircleLabelGeometry,
   handCircleRadiusPx,
   hardHatGeometry,
   headGeometry,
@@ -541,6 +544,119 @@ describe('handCircleGeometry (v3.6: the circle IS the hand and the hitbox)', () 
       circles.right.centre.y - circles.left.centre.y,
     );
     expect(gap).toBeGreaterThan(circles.left.r + circles.right.r);
+  });
+});
+
+describe('handCircleLabelGeometry + drawHandCursors (v3.7: both hands are the menu cursor)', () => {
+  it("the L label sits on the left circle, the R label on the right, sized to the radius", () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const circles = handCircleGeometry(joints);
+    const left = handCircleLabelGeometry(circles.left, 'L');
+    const right = handCircleLabelGeometry(circles.right, 'R');
+    expect(left.text).toBe('L');
+    expect(left.x).toBe(circles.left.centre.x);
+    expect(left.y).toBe(circles.left.centre.y);
+    expect(right.text).toBe('R');
+    expect(right.x).toBe(circles.right.centre.x);
+    expect(right.y).toBe(circles.right.centre.y);
+    // Font = the radius: a bold capital's cap height (~0.7r) fills
+    // the circle without touching its edge, at any body distance.
+    expect(HAND_CIRCLE_LABEL_FONT_RADIUS_FRAC).toBe(1);
+    expect(left.fontPx).toBeCloseTo(circles.left.r, 6);
+    expect(right.fontPx).toBeCloseTo(circles.right.r, 6);
+    // The two labels are apart — one per hand, not one blob.
+    const gap = Math.hypot(right.x - left.x, right.y - left.y);
+    expect(gap).toBeGreaterThan(circles.left.r + circles.right.r);
+  });
+
+  it('the label font scales with the body, like the circle', () => {
+    expect(
+      handCircleLabelGeometry({ centre: { x: 0, y: 0 }, r: 40 }, 'L').fontPx,
+    ).toBeCloseTo(40, 6);
+    expect(
+      handCircleLabelGeometry({ centre: { x: 0, y: 0 }, r: 10 }, 'R').fontPx,
+    ).toBeCloseTo(10, 6);
+  });
+
+  it('drawHandCursors draws exactly two labelled circles and no avatar', () => {
+    const renderer = new AvatarRenderer();
+    const rec = recordingContext();
+    const pose = makePose();
+    renderer.drawHandCursors(rec.ctx, pose, 960, 540, OUTFIT, 1000);
+    const joints = avatarJoints(pose, 960, 540);
+    if (joints === null) throw new Error('fixture pose incomplete');
+    const circles = handCircleGeometry(joints);
+    // One arc per circle, at the wrist, radius = the hand radius —
+    // the same geometry the in-game circles draw from.
+    const arcs = rec.calls.filter((c) => c.method === 'arc');
+    expect(arcs).toHaveLength(2);
+    for (const arc of arcs) {
+      expect(arc.args[2]).toBeCloseTo(circles.left.r, 6);
+    }
+    // No avatar anywhere: no head/feet ellipses, no other shapes.
+    expect(rec.calls.some((c) => c.method === 'ellipse')).toBe(false);
+    // Labels: exactly 'L' and 'R', on the wrist centres.
+    const texts = rec.calls.filter((c) => c.method === 'fillText');
+    expect(texts).toHaveLength(2);
+    const l = texts.find((c) => c.args[0] === 'L');
+    const r = texts.find((c) => c.args[0] === 'R');
+    expect(l).toBeDefined();
+    expect(r).toBeDefined();
+    expect(l?.args[1]).toBeCloseTo(circles.left.centre.x, 6);
+    expect(l?.args[2]).toBeCloseTo(circles.left.centre.y, 6);
+    expect(r?.args[1]).toBeCloseTo(circles.right.centre.x, 6);
+    expect(r?.args[2]).toBeCloseTo(circles.right.centre.y, 6);
+    // Same skin fill as the in-game circles, dark label on top.
+    expect(rec.fillStyles).toContain(OUTFIT.skin.tone);
+    expect(rec.fillStyles).toContain(HAND_CIRCLE_LABEL_COLOR);
+  });
+
+  it('the circles follow the wrists: move the body, the labels move with it', () => {
+    // Fresh renderer per pose: the first smoothed frame returns the
+    // raw joints exactly, so the comparison is pure geometry.
+    const jointsFor = (options: Parameters<typeof makePose>[0]) => {
+      const renderer = new AvatarRenderer();
+      const rec = recordingContext();
+      renderer.drawHandCursors(rec.ctx, makePose(options), 960, 540, OUTFIT, 1000);
+      const texts = rec.calls.filter((c) => c.method === 'fillText');
+      const l = texts.find((c) => c.args[0] === 'L');
+      const r = texts.find((c) => c.args[0] === 'R');
+      if (l === undefined || r === undefined) throw new Error('labels missing');
+      return {
+        l: { x: l.args[1] as number, y: l.args[2] as number },
+        r: { x: r.args[1] as number, y: r.args[2] as number },
+      };
+    };
+    const resting = jointsFor({});
+    const raised = jointsFor({ leftArmDeg: 10, rightArmDeg: -10 });
+    // Both wrists (and their labels) move up a lot when the arms raise.
+    expect(raised.l.y).toBeLessThan(resting.l.y - 100);
+    expect(raised.r.y).toBeLessThan(resting.r.y - 100);
+    // And they land where the pose says: the labels equal the
+    // mirrored wrist landmarks, not a stale position.
+    const raisedJoints = avatarJoints(
+      makePose({ leftArmDeg: 10, rightArmDeg: -10 }),
+      960,
+      540,
+    );
+    if (raisedJoints === null) throw new Error('fixture pose incomplete');
+    expect(raised.l.x).toBeCloseTo(raisedJoints.leftWrist.x, 6);
+    expect(raised.l.y).toBeCloseTo(raisedJoints.leftWrist.y, 6);
+    expect(raised.r.x).toBeCloseTo(raisedJoints.rightWrist.x, 6);
+    expect(raised.r.y).toBeCloseTo(raisedJoints.rightWrist.y, 6);
+  });
+
+  it('drawHandCursors draws nothing (and does not throw) with no body', () => {
+    const renderer = new AvatarRenderer();
+    const rec = recordingContext();
+    expect(() =>
+      renderer.drawHandCursors(rec.ctx, null, 960, 540, OUTFIT, 1000),
+    ).not.toThrow();
+    expect(rec.calls.filter((c) => c.method === 'arc')).toHaveLength(0);
+    expect(rec.calls.filter((c) => c.method === 'fillText')).toHaveLength(0);
   });
 });
 

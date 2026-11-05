@@ -20,6 +20,18 @@
  * every playtest frame showed a smile and no eyes. The face sits in
  * the visible band below the brim.
  *
+ * Hand circles (v3.6): each arm ends in a circle centred exactly on
+ * the (smoothed) wrist landmark — the circle IS the hand and IS the
+ * hitbox for every hand interaction, so what the player sees is
+ * where the game thinks the hand is. Brandon's v3.5 playtest had
+ * nothing on screen showing the hand position (the arm tips missed
+ * his real hands by ~50–100 px), so aiming was guesswork. The
+ * forearm capsule stops inside the circle (see `forearmEndPoint`),
+ * never poking past the wrist. Both hands get circles whenever the
+ * avatar is drawn. `handCircleGeometry` is the single source for
+ * the circle centre + radius: the detectors and the pointer
+ * highlight (Worker B) read the same numbers the render draws.
+ *
  * Canvas drawing itself is untestable in Node — the pure geometry
  * helpers below (`avatarJoints`, `limbWidthPx`, `headRadiusPx`,
  * `resolveOutfit`, `torsoGeometry`, `bottomsGeometry`) carry the unit
@@ -124,6 +136,75 @@ export function limbWidthPx(torsoLengthPx: number): number {
 /** Pure: head radius for a body of this canvas torso length. */
 export function headRadiusPx(torsoLengthPx: number): number {
   return AVATAR.headRadiusTorsoFrac * torsoLengthPx;
+}
+
+/**
+ * Hand-circle radius, as a fraction of torso length (v3.6).
+ *
+ * 0.125, so the circle is 0.25 torso lengths across — the same
+ * width as a v3.5 press pad, fist-sized: a fist (~0.18–0.2 torso
+ * wide) fills the circle with a little margin, and the circle is
+ * clearly visible at stage size without swallowing the forearm.
+ * The old hand dot (radius `limbW * 0.55` = 0.088 torso) was
+ * smaller than a fist, the same colour as the arm, and had no
+ * outline — it read as the arm's rounded tip, not a hand.
+ */
+export const HAND_CIRCLE_RADIUS_TORSO_FRAC = 0.125;
+
+/** Dark outline for the hand circles — reads against any background. */
+export const HAND_CIRCLE_OUTLINE = '#7a5230';
+
+/** Pure: hand-circle radius for a body of this canvas torso length. */
+export function handCircleRadiusPx(torsoLengthPx: number): number {
+  return HAND_CIRCLE_RADIUS_TORSO_FRAC * torsoLengthPx;
+}
+
+/** Canvas-space hand circle for one hand: centre + radius. */
+export interface HandCircleGeometry {
+  /** Centre — exactly the (smoothed) wrist joint position. */
+  centre: Vec2;
+  /** Radius, canvas px. */
+  r: number;
+}
+
+/**
+ * Pure: the hand circles for a pose (v3.6). Each circle is centred
+ * exactly on its wrist joint — the same smoothed position the
+ * detectors use, so the circle IS the hand and IS the hitbox: where
+ * the player sees the circle is where the game thinks the hand is.
+ * Pass the SMOOTHED joints (what `draw()` draws from), not the raw
+ * landmarks, or the circle will sit on the unsmoothed wrist while
+ * the arm follows the smoothed one. Radius is
+ * `handCircleRadiusPx(torsoLengthPx)` for both hands.
+ */
+export function handCircleGeometry(joints: AvatarJoints): {
+  left: HandCircleGeometry;
+  right: HandCircleGeometry;
+} {
+  const r = handCircleRadiusPx(joints.torsoLengthPx);
+  return {
+    left: { centre: joints.leftWrist, r },
+    right: { centre: joints.rightWrist, r },
+  };
+}
+
+/**
+ * Pure: where the forearm capsule ends (v3.6). The capsule runs
+ * elbow -> this point, NOT elbow -> wrist: the point sits
+ * `0.5 * handRadius` back from the wrist along the forearm, so the
+ * capsule's round cap (half-width `0.9 * limbW / 2` = 0.072 torso)
+ * ends at wrist − 0.0625 + 0.072 ≈ wrist + 0.01 torso — inside the
+ * hand circle (radius 0.125 torso), never poking past the wrist.
+ * A capsule drawn all the way to the wrist ends ~0.072 torso past
+ * it, which is the floating rounded tip the v3.5 playtest showed.
+ */
+export function forearmEndPoint(
+  elbow: Vec2,
+  wrist: Vec2,
+  handRadius: number,
+): Vec2 {
+  const dir = vUnit(vSub(wrist, elbow));
+  return vSub(wrist, vScale(dir, handRadius * 0.5));
 }
 
 /** Canvas-space head circle for a pose: centre + radius. */
@@ -586,13 +667,37 @@ export class AvatarRenderer {
     const shoulder = side === 'left' ? j.leftShoulder : j.rightShoulder;
     const elbow = side === 'left' ? j.leftElbow : j.rightElbow;
     const wrist = side === 'left' ? j.leftWrist : j.rightWrist;
+    const handR = handCircleRadiusPx(j.torsoLengthPx);
     capsule(ctx, shoulder, elbow, limbW, skin);
-    capsule(ctx, elbow, wrist, limbW * 0.9, skin);
-    // Hand: a fist-sized dot at the wrist.
+    // Forearm stops inside the hand circle (v3.6): the capsule
+    // terminates at the circle, its round cap never poking past
+    // the wrist the way the v3.5 arm tips did.
+    capsule(ctx, elbow, forearmEndPoint(elbow, wrist, handR), limbW * 0.9, skin);
+    // Hand: a fist-sized circle at the wrist, drawn AFTER (over)
+    // the arm capsules — the circle IS the hand and IS the hitbox.
+    this.drawHandCircle(ctx, wrist, handR, skin);
+  }
+
+  /**
+   * Hand circle (v3.6): skin-toned fill with a darker outline, so
+   * it reads as a hand against any background and is
+   * distinguishable from the arm capsule behind it. Centred
+   * exactly on the wrist landmark. The pointer highlight (Worker
+   * B) rings this same circle via `handCircleGeometry`.
+   */
+  private drawHandCircle(
+    ctx: CanvasRenderingContext2D,
+    wrist: Vec2,
+    handR: number,
+    skin: string,
+  ): void {
     ctx.fillStyle = skin;
+    ctx.strokeStyle = HAND_CIRCLE_OUTLINE;
+    ctx.lineWidth = Math.max(2, handR * 0.12);
     ctx.beginPath();
-    ctx.arc(wrist.x, wrist.y, limbW * 0.55, 0, Math.PI * 2);
+    ctx.arc(wrist.x, wrist.y, handR, 0, Math.PI * 2);
     ctx.fill();
+    ctx.stroke();
   }
 
   private drawLeg(

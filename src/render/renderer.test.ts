@@ -13,8 +13,11 @@ const readFileSync: (path: string, encoding: 'utf8') => string =
 import { RENDER } from '../core/config';
 import {
   GATE_BANNER,
+  drawActionButton,
   drawBlockingOverlay,
   drawGateBanner,
+  drawHoverRing,
+  drawPointerCursor,
   gateBannerRect,
 } from './renderer';
 
@@ -217,6 +220,180 @@ describe('drawGateBanner (v3.2)', () => {
  * Brandon's laptop, real font metrics, real camera feel — is stated
  * in the report, not here.
  */
+describe('drawActionButton + drawPointerCursor (v3.6)', () => {
+  /** Records arcs with the stroke/fill style in force + texts + rects. */
+  function actionRecordingContext(): {
+    ctx: CanvasRenderingContext2D;
+    arcs: {
+      x: number;
+      y: number;
+      r: number;
+      start: number;
+      end: number;
+      strokeStyle: string;
+    }[];
+    texts: { text: string; x: number; y: number }[];
+    rects: { x: number; y: number; w: number; h: number }[];
+  } {
+    const arcs: {
+      x: number;
+      y: number;
+      r: number;
+      start: number;
+      end: number;
+      strokeStyle: string;
+    }[] = [];
+    const texts: { text: string; x: number; y: number }[] = [];
+    const rects: { x: number; y: number; w: number; h: number }[] = [];
+    let strokeStyle = '';
+    let fillStyle = '';
+    const target: Record<string, unknown> = {};
+    const stub = new Proxy(target, {
+      get: (_t, prop) => {
+        if (prop === 'canvas') return { width: 960, height: 540 };
+        if (prop === 'arc') {
+          return (
+            x: number,
+            y: number,
+            r: number,
+            start: number,
+            end: number,
+          ) => {
+            arcs.push({ x, y, r, start, end, strokeStyle });
+          };
+        }
+        if (prop === 'fillText') {
+          return (text: string, x: number, y: number) => {
+            texts.push({ text, x, y });
+          };
+        }
+        if (prop === 'fillRect') {
+          return (x: number, y: number, w: number, h: number) => {
+            rects.push({ x, y, w, h });
+          };
+        }
+        if (prop === 'strokeRect') {
+          return (x: number, y: number, w: number, h: number) => {
+            rects.push({ x, y, w, h });
+          };
+        }
+        if (prop === 'measureText') {
+          return (text: string) => ({ width: text.length * 11 });
+        }
+        return () => undefined;
+      },
+      set: (t, prop, value) => {
+        if (prop === 'strokeStyle') strokeStyle = String(value);
+        if (prop === 'fillStyle') fillStyle = String(value);
+        void fillStyle;
+        t[prop as string] = value;
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx: stub, arcs, texts, rects };
+  }
+
+  it('town mode: circle top-right, houses icon, "Town" label', () => {
+    const rec = actionRecordingContext();
+    drawActionButton(rec.ctx, 960, 540, 'town', 0);
+    // Body circle at (888, 84), r 36.
+    expect(
+      rec.arcs.some((a) => a.x === 888 && a.y === 84 && a.r === 36),
+    ).toBe(true);
+    // Dwell track ring just outside the body (r 42), full circle.
+    const track = rec.arcs.find((a) => a.r === 42);
+    expect(track).toBeDefined();
+    expect(track?.start).toBe(0);
+    expect(track?.end).toBeCloseTo(Math.PI * 2, 5);
+    // No fill arc at progress 0 (only the track + border + body).
+    expect(
+      rec.arcs.filter((a) => a.r === 42 && a.end < Math.PI * 2),
+    ).toHaveLength(0);
+    // Houses icon: two 20x14 bodies.
+    expect(
+      rec.rects.filter((r) => r.w === 20 && r.h === 14),
+    ).toHaveLength(2);
+    // Label under the circle, centred.
+    const label = rec.texts.find((t) => t.text === 'Town');
+    expect(label).toBeDefined();
+    expect(label?.x).toBe(888);
+    expect(label?.y).toBe(84 + 36 + 18);
+  });
+
+  it('ok mode: checkmark icon, "OK" label, brighter border', () => {
+    const rec = actionRecordingContext();
+    drawActionButton(rec.ctx, 960, 540, 'ok', 0);
+    // No house bodies in ok mode.
+    expect(
+      rec.rects.filter((r) => r.w === 20 && r.h === 14),
+    ).toHaveLength(0);
+    const label = rec.texts.find((t) => t.text === 'OK');
+    expect(label).toBeDefined();
+    expect(label?.x).toBe(888);
+    // The border arc is the brighter gold in ok mode.
+    const border = rec.arcs.find(
+      (a) => a.r === 36 && a.strokeStyle === '#ffe08a',
+    );
+    expect(border).toBeDefined();
+  });
+
+  it('dwell fill: the progress arc sweeps from the top as the hold grows', () => {
+    const rec = actionRecordingContext();
+    drawActionButton(rec.ctx, 960, 540, 'town', 0.5);
+    const fill = rec.arcs.find(
+      (a) => a.r === 42 && a.start === -Math.PI / 2 && a.end > 0,
+    );
+    expect(fill).toBeDefined();
+    // Half a hold = half the circle, starting at the top.
+    expect(fill?.end).toBeCloseTo(-Math.PI / 2 + Math.PI, 5);
+    const recFull = actionRecordingContext();
+    drawActionButton(recFull.ctx, 960, 540, 'town', 1);
+    const full = recFull.arcs.find(
+      (a) => a.r === 42 && a.start === -Math.PI / 2 && a.end > Math.PI,
+    );
+    expect(full?.end).toBeCloseTo(-Math.PI / 2 + Math.PI * 2, 5);
+  });
+
+  it('drawPointerCursor: gold ring + dot at the pointer, bigger + brighter while hovering', () => {
+    const rec = actionRecordingContext();
+    // Sim torso (0.3 video x 540 px = 162 px) -> hand circle r 20.25.
+    drawPointerCursor(rec.ctx, 500, 200, 20, false);
+    expect(
+      rec.arcs.some((a) => a.x === 500 && a.y === 200 && a.r === 26),
+    ).toBe(true);
+    expect(
+      rec.arcs.some((a) => a.x === 500 && a.y === 200 && a.r === 4),
+    ).toBe(true);
+    const recHover = actionRecordingContext();
+    drawPointerCursor(recHover.ctx, 500, 200, 20, true);
+    expect(
+      recHover.arcs.some(
+        (a) =>
+          a.x === 500 &&
+          a.y === 200 &&
+          a.r === 30 &&
+          a.strokeStyle === '#ffe08a',
+      ),
+    ).toBe(true);
+    // The ring follows the hand-circle radius: a closer body (bigger
+    // hand circle) gets a bigger ring, never a ring buried inside it.
+    const recBig = actionRecordingContext();
+    drawPointerCursor(recBig.ctx, 500, 200, 40, false);
+    expect(
+      recBig.arcs.some((a) => a.x === 500 && a.y === 200 && a.r === 46),
+    ).toBe(true);
+  });
+
+  it('drawHoverRing: bright gold stroke just outside the rect', () => {
+    const rec = actionRecordingContext();
+    drawHoverRing(rec.ctx, { x: 160, y: 140, w: 640, h: 96 });
+    const ring = rec.rects.find(
+      (r) => r.x === 157 && r.y === 137 && r.w === 646 && r.h === 102,
+    );
+    expect(ring).toBeDefined();
+  });
+});
+
 describe('page fit at 1728x1080 (v3.2)', () => {
   // Read from the repo root (vitest runs with cwd = the package
   // root), so the numbers below always come from the real files.

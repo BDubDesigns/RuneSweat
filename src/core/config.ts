@@ -456,21 +456,22 @@ export const SWING = {
  * vertical space, no legs. Forgiving on purpose: the hold is short
  * (300 ms); the detector judges the press, not perfection.
  *
- * v3.5 geometry (Nov 4 playtest): Brandon's v3.4 verdict was that the
- * pedestals were giant gold slabs at the far bottom corners, too far
- * from his body to reach, with no distinct button. The zones moved
- * in to where the hands already hang and shrank to fist size:
- * centres at hip-mid ±0.55 torso (was ±0.8), 0.25 wide × 0.2 tall
- * (was 0.5 × 0.4), top just below the hip line (was 0.15 above it).
- * The numbers are anchored to a measurement, not a guess: the sim
- * body's hanging wrists (`sim/mouseSource.ts`, arms at ±π·0.94 from
- * straight up) rest at hip-mid ±0.567 torso horizontally and hip +
- * 0.048 torso vertically, so a ±0.55 centre puts the resting wrist
- * ~0.017 torso off the zone centre, and a top at hip + 0.02 torso
- * puts it ~0.028 torso below the zone top — the press is a short
- * downward push from rest, not a reach. The 0.2 height holds the
- * ~0.1-torso press travel plus slack: resting wrist + 0.1 torso
- * still sits ~0.072 torso above the zone bottom. */
+ * v3.6 geometry (Nov 5 playtest): Brandon's v3.5 video showed the
+ * pads still too low — at knee height at the very bottom of the stage
+ * while his hands hang at hip/thigh height, counter 0/3 the whole
+ * video — and nothing on screen showed where the game thinks his
+ * hands are, so aiming was guesswork. The zones move UP to
+ * waist/hip height and get taller: top at hip − 0.06 torso (was
+ * hip + 0.02), 0.32 tall (was 0.2), same ±0.55 centres and 0.25
+ * width. Anchored to the same measurement: the sim body's hanging
+ * wrists rest at hip-mid ±0.567 torso, hip + 0.048 torso, so the
+ * resting wrist now sits ~0.108 torso below the zone top (it enters
+ * the pad from above, with room) and a 0.1-torso push ends at hip +
+ * 0.148 torso, ~0.112 torso above the zone bottom — the push fits
+ * with slack on both ends instead of starting at the top edge. The
+ * sim's pressed depth (hip + 0.12 torso) lands mid-pad. The hand
+ * circles (`render/avatar.ts`, v3.6) are the aiming fix: a visible
+ * circle at each wrist, the same position the detectors use. */
 export const PRESS = {
   /**
    * Both wrists must stay inside their button zones this long (ms)
@@ -502,21 +503,25 @@ export const PRESS = {
    */
   buttonZoneWTorsoFrac: 0.25,
   /**
-   * Button-zone height, in torso lengths. 0.2 fits the ~0.1-torso
-   * downward press travel plus slack for the hold: the resting
-   * wrist sits ~0.028 torso below the zone top, and after the full
-   * 0.1-torso push it still sits ~0.072 torso above the bottom.
-   * Was 0.4 (v3.4).
+   * Button-zone height, in torso lengths. 0.32 spans hip − 0.06 to
+   * hip + 0.26 torso: the resting wrist (hip + 0.048) sits ~0.108
+   * torso below the top, and after the full ~0.1-torso press travel
+   * (hip + 0.148) it still sits ~0.112 torso above the bottom —
+   * slack on both ends, so the push never clips an edge. Was 0.2
+   * (v3.5): the wrist started ~0.028 below the top edge, so any
+   * upward jitter left the zone before the press began.
    */
-  buttonZoneHTorsoFrac: 0.2,
+  buttonZoneHTorsoFrac: 0.32,
   /**
    * Button-zone top, relative to the hip line, in torso lengths.
-   * +0.02 puts the top just below the hips: the buttons sit at
-   * resting hand height, where the hands naturally hang (the sim
-   * body's resting wrists are at hip + 0.048 torso), not at waist
-   * height above the hips. Was -0.15 (v3.4).
+   * −0.06 puts the top 0.06 torso ABOVE the hips — waist height,
+   * where the hands hang, not knee height at the stage bottom
+   * (Brandon's v3.5 playtest: pads at the very bottom, hands at
+   * hip/thigh, counter 0/3). The top sits ~0.108 torso above the
+   * resting wrist (hip + 0.048), so the hand enters the pad from
+   * above. Was +0.02 (v3.5).
    */
-  buttonZoneTopOffsetTorsoFrac: 0.02,
+  buttonZoneTopOffsetTorsoFrac: -0.06,
   /**
    * Pedestals slide in from off-screen over this long (ms) once the
    * hopper fills — render only; the detector does not read it.
@@ -527,6 +532,60 @@ export const PRESS = {
    * — render only; the detector does not read it.
    */
   pressDepthTorsoFrac: 0.12,
+} as const;
+
+/**
+ * Hand-pointer system (v3.6, Nov 5, 2026): two hands, fixed split —
+ * Brandon's design from the v3.5 playtest. His right hand reaches
+ * the top-right action circle, so the split is:
+ *
+ * - `pointerHand: 'left'` — the left wrist drives the cursor. Hovering
+ *   a selectable thing highlights it; the pointer IS the left hand's
+ *   circle (plus the gold cursor ring `render/renderer.ts` draws).
+ * - `confirmHand: 'right'` — the right hand dwells on the action
+ *   circle (~2 s) to click the highlighted thing.
+ *
+ * Fixed, not both-hands-can-do-everything: the split is the design,
+ * and flipping it later is a one-line change here — every reader
+ * (`core/pointer.ts` `handPoint`, `main.ts`, the sim's confirm key)
+ * reads these two fields, never a hardcoded side.
+ */
+export const POINTER = {
+  /** Which hand drives the cursor. */
+  pointerHand: 'left' as 'left' | 'right',
+  /** Which hand dwells on the action circle to confirm. */
+  confirmHand: 'right' as 'left' | 'right',
+} as const;
+
+/**
+ * The top-right action button (v3.6): one context-sensitive circle
+ * that replaces the bottom-left "Leave to town" chip — the chip sat
+ * half-hidden behind the left press pad in every frame of Brandon's
+ * v3.5 playtest video, so the chip is gone and this circle is the
+ * only way out of an activity by hand (Space / the Town button still
+ * work too).
+ *
+ * Geometry: top-right of the stage, out of the body's way — centre
+ * `width - centreMarginRightPx`, `centreYPx` from the top, radius
+ * `radiusPx`. At 960×540 that is (888, 84), r 36: clear of the press
+ * pads (y ~287+), the pile/hopper (y 237+), the resting torso
+ * (x ≤ 586), the picker cards (x ≤ 800) and the gate banner
+ * (bottom y 40) — see the layout test in `core/actionButton.test.ts`.
+ *
+ * Two modes, and the icon change is the mode signal: houses in an
+ * activity with nothing highlighted (dwell = go to town), checkmark
+ * when the pointer hovers a selectable thing (dwell = click it).
+ * The label under the circle changes with the mode too.
+ */
+export const ACTION_BUTTON = {
+  /** Hold time for a dwell to fire, in ms. */
+  dwellMs: 2000,
+  /** Circle radius in px. */
+  radiusPx: 36,
+  /** Centre x = stage width − this. */
+  centreMarginRightPx: 72,
+  /** Centre y in px from the stage top. */
+  centreYPx: 84,
 } as const;
 
 /** Refiner tuning (`games/refiner/`). */

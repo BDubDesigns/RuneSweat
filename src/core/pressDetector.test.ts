@@ -4,17 +4,19 @@ import { PressDetector, pressButtonZones, type PressWrist } from './pressDetecto
 /**
  * Synthetic stance for the detector: hip-mid (0.5, 0.55), torso
  * 0.3. The zones land at left centre x 0.335 / right centre x
- * 0.665, top y 0.556, bottom y 0.616 — so a wrist at the zone
- * centres (0.335, 0.586) / (0.665, 0.586) is dead centre in each
+ * 0.665, top y 0.532, bottom y 0.628 — so a wrist at the zone
+ * centres (0.335, 0.58) / (0.665, 0.58) is dead centre in each
  * button.
  *
  * Resting-wrist measurement (v3.5): the sim body's hanging wrists
  * (`sim/mouseSource.ts`, arms at ±π·0.94 from straight up, arm
  * length 0.32, shoulders (0.39 / 0.61, 0.25)) rest at
  * (0.330, 0.564) / (0.670, 0.564) — hip-mid ±0.567 torso
- * horizontally, hip + 0.048 torso vertically. The zones are built
- * around that rest position: the resting wrist sits ~0.005 off the
- * zone centre horizontally and ~0.008 below the zone top.
+ * horizontally, hip + 0.048 torso vertically. The v3.6 zones are
+ * built around that rest position with room on both ends: the
+ * resting wrist sits ~0.108 torso below the zone top (0.532) and
+ * a 0.1-torso push ends at 0.594, ~0.112 torso above the zone
+ * bottom (0.628).
  */
 const HIP_MID_X = 0.5;
 const HIP_MID_Y = 0.55;
@@ -50,8 +52,8 @@ function step(
 /**
  * A full press: both wrists in the zones, moving downward from the
  * resting position, held 300 ms. Frames at 100 ms: y 0.564 -> 0.574
- * -> 0.584 -> 0.594, all inside the zones (top 0.556, bottom
- * 0.616) — a 0.1-torso push from rest, not a reach.
+ * -> 0.584 -> 0.594, all inside the zones (top 0.532, bottom
+ * 0.628) — a 0.1-torso push from rest, not a reach.
  */
 function fullPress(detector: PressDetector, t0: number): void {
   expect(step(detector, REST_Y, t0)).toBeNull();
@@ -61,27 +63,46 @@ function fullPress(detector: PressDetector, t0: number): void {
 }
 
 describe('pressButtonZones', () => {
-  it('places the zones at ±0.55 torso from hip-mid, at resting hand height', () => {
+  it('places the zones at ±0.55 torso from hip-mid, at waist/hip height', () => {
     const zones = pressButtonZones(HIP_MID_X, HIP_MID_Y, TORSO);
     // Centres: 0.5 ± 0.55 * 0.3 = 0.335 / 0.665.
     expect(zones.left.x + zones.left.w / 2).toBeCloseTo(0.335);
     expect(zones.right.x + zones.right.w / 2).toBeCloseTo(0.665);
-    // Top: hip line + 0.02 torso = 0.55 + 0.006 = 0.556.
-    expect(zones.left.y).toBeCloseTo(0.556);
-    expect(zones.right.y).toBeCloseTo(0.556);
-    // Size: 0.25 wide × 0.2 tall, in torso lengths.
+    // Top: hip line − 0.06 torso = 0.55 − 0.018 = 0.532.
+    expect(zones.left.y).toBeCloseTo(0.532);
+    expect(zones.right.y).toBeCloseTo(0.532);
+    // Size: 0.25 wide × 0.32 tall, in torso lengths.
     expect(zones.left.w).toBeCloseTo(0.075);
-    expect(zones.left.h).toBeCloseTo(0.06);
+    expect(zones.left.h).toBeCloseTo(0.096);
     expect(zones.right.w).toBeCloseTo(0.075);
-    expect(zones.right.h).toBeCloseTo(0.06);
+    expect(zones.right.h).toBeCloseTo(0.096);
   });
 
-  it('zones are fist-sized and close to the body (v3.5 bounds)', () => {
+  it('v3.6: zones are HIGHER and TALLER than v3.5 (the playtest fix)', () => {
+    const zones = pressButtonZones(HIP_MID_X, HIP_MID_Y, TORSO);
+    // v3.5 top was hip + 0.02 torso = 0.556; v3.6 top is 0.532 —
+    // above it (smaller y = higher on screen).
+    expect(zones.left.y).toBeLessThan(0.556);
+    expect(zones.right.y).toBeLessThan(0.556);
+    // v3.5 height was 0.2 torso = 0.06; v3.6 is 0.32 torso = 0.096.
+    expect(zones.left.h / TORSO).toBeGreaterThan(0.2);
+    expect(zones.left.h).toBeCloseTo(0.096);
+    // Width and offset unchanged from v3.5: still fist-wide pads
+    // close to the body, not a reach.
+    expect(zones.left.w / TORSO).toBeCloseTo(0.25);
+    const centreX = zones.left.x + zones.left.w / 2;
+    expect(Math.abs(centreX - HIP_MID_X) / TORSO).toBeCloseTo(0.55);
+  });
+
+  it('zones are fist-wide and close to the body (v3.6 bounds)', () => {
     const zones = pressButtonZones(HIP_MID_X, HIP_MID_Y, TORSO);
     for (const zone of [zones.left, zones.right]) {
-      // Width ≤ 0.25 torso, height ≤ 0.2 torso: a button, not a slab.
+      // Width ≤ 0.25 torso: a button, not a slab. Height 0.32
+      // torso: tall enough for the push, still narrower than the
+      // v3.4 slab (0.4) — a tall button, not a wall.
       expect(zone.w / TORSO).toBeLessThanOrEqual(0.25);
-      expect(zone.h / TORSO).toBeLessThanOrEqual(0.2);
+      expect(zone.h / TORSO).toBeGreaterThan(0.2);
+      expect(zone.h / TORSO).toBeLessThanOrEqual(0.35);
       // Centre offset ≤ 0.55 torso from hip-mid: a push, not a reach.
       // (+1e-9: 0.55 * 0.3 / 0.3 reads 0.5500000000000002 in float.)
       const centreX = zone.x + zone.w / 2;
@@ -99,7 +120,7 @@ describe('pressButtonZones', () => {
     }
   });
 
-  it('zones sit at resting-wrist height: rest near the top, travel inside', () => {
+  it('zones sit at resting-wrist height: rest inside with slack both ends', () => {
     const zones = pressButtonZones(HIP_MID_X, HIP_MID_Y, TORSO);
     for (const [zone, restX] of [
       [zones.left, REST_LEFT_X],
@@ -108,14 +129,16 @@ describe('pressButtonZones', () => {
       // The resting wrist is inside its zone horizontally.
       expect(restX).toBeGreaterThanOrEqual(zone.x);
       expect(restX).toBeLessThanOrEqual(zone.x + zone.w);
-      // The zone top is at or just above the resting wrist (video
-      // space y is down, so "above" is a smaller y) — the wrist sits
-      // near the TOP of the zone, with the press travel below it.
-      expect(zone.y).toBeLessThanOrEqual(REST_Y);
-      expect((REST_Y - zone.y) / TORSO).toBeLessThanOrEqual(0.05);
+      // The zone top sits ABOVE the resting wrist (video space y
+      // is down, so "above" is a smaller y) — the wrist enters the
+      // pad from above, ~0.108 torso below the top, not perched on
+      // the top edge the way v3.5's 0.028-torso margin did.
+      expect(zone.y).toBeLessThan(REST_Y);
+      expect((REST_Y - zone.y) / TORSO).toBeCloseTo(0.107, 1);
       // Resting wrist + the full ~0.1-torso downward press travel
-      // stays inside the zone (above the bottom edge).
+      // stays inside the zone with ~0.112 torso of slack below it.
       expect(REST_Y + PRESS_TRAVEL).toBeLessThanOrEqual(zone.y + zone.h);
+      expect((zone.y + zone.h - (REST_Y + PRESS_TRAVEL)) / TORSO).toBeGreaterThan(0.1);
     }
   });
 });
@@ -180,12 +203,12 @@ describe('PressDetector', () => {
 
   it('does NOT count wrists above the buttons', () => {
     const detector = new PressDetector();
-    // y 0.50-0.55 is above the zone tops (0.556) — hands raised, not pressing.
-    expect(step(detector, 0.5, 1000)).toBeNull();
-    expect(step(detector, 0.52, 1100)).toBeNull();
-    expect(step(detector, 0.54, 1200)).toBeNull();
-    expect(step(detector, 0.55, 1300)).toBeNull();
-    expect(step(detector, 0.55, 2000)).toBeNull();
+    // y 0.46-0.51 is above the zone tops (0.532) — hands raised, not pressing.
+    expect(step(detector, 0.46, 1000)).toBeNull();
+    expect(step(detector, 0.48, 1100)).toBeNull();
+    expect(step(detector, 0.5, 1200)).toBeNull();
+    expect(step(detector, 0.51, 1300)).toBeNull();
+    expect(step(detector, 0.51, 2000)).toBeNull();
   });
 
   it('fires once per hold: a second press needs a re-arm (wrists leave, then return)', () => {

@@ -27,6 +27,19 @@
  *   refiner batch. `W` jump stays as a general sim capability (it still
  *   drives `BodyState.jumping`, shown in the debug HUD) — it is just no
  *   longer the refiner's input.
+ * - Mouse (v3.6): the pointer HAND. The mouse position drives the
+ *   left (pointer) wrist directly — move the mouse over a recipe card
+ *   or a hub button and the left hand points at it. The wrist follows
+ *   with a ~120 ms lag, like a hand, not a teleporting cursor. A held
+ *   arm raise (mouse button / A / Q) overrides the follow for that arm
+ *   while held, and the clasp / press override it too — pointing never
+ *   fights a swing or a press.
+ * - `C` (hold, v3.6): confirm. The RIGHT (confirm) wrist animates to
+ *   the top-right action circle and holds there — hold it ~2 s and the
+ *   dwell fires (clicks the highlighted thing, or goes to town with
+ *   nothing highlighted). Release returns the hand to rest. C, not
+ *   anything else: P is the press, F is fullscreen, W/S/Q/E/A/D are
+ *   already sim keys.
  *
  * Two-handed clasp (Swing Lab v2): when BOTH arms are raised straight up
  * at the same time (A+D, or both mouse buttons), the hands grip one
@@ -51,9 +64,9 @@
  * until the arms rest again.
  */
 
-import { PRESS, SIM } from '../core/config';
+import { ACTION_BUTTON, PRESS, SIM, STAGE } from '../core/config';
 import { PoseLandmark, type PoseFrameSource, type RawPoseFrame, type NormalizedLandmark } from '../tracking/poseTypes';
-import { clamp, lerp } from '../render/stage';
+import { clamp, lerp, toNormalized } from '../render/stage';
 
 /** Grace after both arms are fully down before the clasp releases, in ms.
  * The tracker lags the raw motion, so the smoothed wrists cross the
@@ -75,6 +88,32 @@ const CLASP_RELEASE_GRACE_MS = 500;
  * reads, or the sim batch can never complete.
  */
 const PRESS_ANIM_MS = 240;
+
+/**
+ * Pointer-hand follow time (ms, v3.6): the left wrist chases the
+ * mouse position with this time constant — a hand, not a teleporting
+ * cursor. ~120 ms (the arm-raise time) so the hand lands on the
+ * thing just after the mouse does.
+ */
+const POINTER_HAND_ANIM_MS = 120;
+
+/** Confirm-hand travel time (ms, v3.6): same feel as the press. */
+const CONFIRM_ANIM_MS = 240;
+
+/**
+ * Where the confirm hand goes (v3.6): the action circle's centre,
+ * in normalized video space — the circle is fixed in canvas space
+ * (`ACTION_BUTTON` + `STAGE`), so its video-space target is fixed
+ * too. The sim's right wrist animates here while C is held.
+ */
+const CONFIRM_TARGET: { x: number; y: number } = toNormalized(
+  {
+    x: STAGE.width - ACTION_BUTTON.centreMarginRightPx,
+    y: ACTION_BUTTON.centreYPx,
+  },
+  STAGE.width,
+  STAGE.height,
+);
 
 interface ArmSim {
   /** 0 = down, 1 = fully raised. Animates toward `target`. */
@@ -113,6 +152,19 @@ export class MouseSource implements PoseFrameSource {
   private pressing = false;
   /** 0 = rest, 1 = fully pressed. Animates toward `pressing ? 1 : 0`. */
   private pressT = 0;
+  /**
+   * Pointer hand (v3.6): video-space target the LEFT wrist follows
+   * (set from the mouse position by main.ts), or null for the
+   * classic hanging arm. `pointerHandCurrent` is the smoothed wrist
+   * chasing it — null until the first follow frame, so the hand
+   * starts from where it hangs instead of snapping to the mouse.
+   */
+  private pointerHandTarget: { x: number; y: number } | null = null;
+  private pointerHandCurrent: { x: number; y: number } | null = null;
+  /** C held: the RIGHT wrist travels to the action circle (v3.6). */
+  private confirming = false;
+  /** 0 = rest, 1 = on the circle. Animates toward `confirming ? 1 : 0`. */
+  private confirmT = 0;
   private lastNowMs: number | null = null;
 
   public start(nowMs: number): void {
@@ -125,6 +177,12 @@ export class MouseSource implements PoseFrameSource {
     this.lastNowMs = null;
     this.clasped = false;
     this.claspReleaseAtMs = null;
+    this.pressing = false;
+    this.pressT = 0;
+    this.pointerHandTarget = null;
+    this.pointerHandCurrent = null;
+    this.confirming = false;
+    this.confirmT = 0;
   }
 
   /**
@@ -170,6 +228,26 @@ export class MouseSource implements PoseFrameSource {
   /** P (hold): press both forge buttons (v3.4, refiner). */
   public setPressing(pressing: boolean): void {
     this.pressing = pressing;
+  }
+
+  /**
+   * Pointer hand (v3.6): the video-space point the LEFT wrist
+   * follows — main.ts passes the mouse position (already in video
+   * space via `toNormalized`). Null restores the classic hanging
+   * arm. A held raise (mouse button / A / Q) overrides the follow
+   * while held; the clasp and the press override it too.
+   */
+  public setPointerHand(point: { x: number; y: number } | null): void {
+    this.pointerHandTarget =
+      point === null
+        ? null
+        : { x: clamp(point.x, 0, 1), y: clamp(point.y, 0, 1) };
+    if (point === null) this.pointerHandCurrent = null;
+  }
+
+  /** C (hold): move the RIGHT (confirm) wrist to the action circle. */
+  public setConfirming(confirming: boolean): void {
+    this.confirming = confirming;
   }
 
   private advanceArm(arm: ArmSim, dtMs: number): void {
@@ -248,6 +326,16 @@ export class MouseSource implements PoseFrameSource {
       this.pressT = Math.max(pressTarget, this.pressT - pressStep);
     }
 
+    // Confirm animation: C held drives confirmT 0 -> 1 over
+    // CONFIRM_ANIM_MS; release drives it back to 0 at the same rate.
+    const confirmTarget = this.confirming ? 1 : 0;
+    const confirmStep = dtMs / CONFIRM_ANIM_MS;
+    if (this.confirmT < confirmTarget) {
+      this.confirmT = Math.min(confirmTarget, this.confirmT + confirmStep);
+    } else if (this.confirmT > confirmTarget) {
+      this.confirmT = Math.max(confirmTarget, this.confirmT - confirmStep);
+    }
+
     const armPoints = (side: 'left' | 'right'): {
       elbow: NormalizedLandmark;
       wrist: NormalizedLandmark;
@@ -291,6 +379,62 @@ export class MouseSource implements PoseFrameSource {
         wrist = lm(
           shoulder.x + dirX * SIM.armLength,
           shoulder.y + dirY * SIM.armLength,
+        );
+      }
+      if (side === 'left' && this.pointerHandTarget !== null) {
+        // Pointer hand (v3.6): the mouse drives the left wrist. Only
+        // when the arm is not raised and not clasped — a held raise
+        // (mouse button / A / Q) overrides the follow while held, and
+        // the clasp branch above already returned the handle wrist,
+        // so pointing never fights a swing. The wrist chases the
+        // target with a ~120 ms time constant (a hand, not a
+        // teleporting cursor); it starts from where it hangs, so the
+        // first follow frame does not snap. While overridden, the
+        // smoothed position resets, so the follow resumes from the
+        // live wrist instead of gliding in from a stale point.
+        const raised =
+          this.pointerLeftDown || this.keyLeft || this.keyLeftAngled;
+        if (raised || this.clasped) {
+          this.pointerHandCurrent = null;
+        } else {
+          const target = this.pointerHandTarget;
+          if (this.pointerHandCurrent === null) {
+            this.pointerHandCurrent = { x: wrist.x, y: wrist.y };
+          }
+          const step = Math.min(1, dtMs / POINTER_HAND_ANIM_MS);
+          this.pointerHandCurrent = {
+            x: lerp(this.pointerHandCurrent.x, target.x, step),
+            y: lerp(this.pointerHandCurrent.y, target.y, step),
+          };
+          wrist = lm(this.pointerHandCurrent.x, this.pointerHandCurrent.y);
+          elbow = lm(
+            shoulder.x + (wrist.x - shoulder.x) * 0.55,
+            shoulder.y + (wrist.y - shoulder.y) * 0.55,
+          );
+        }
+      }
+      if (side === 'right' && this.confirmT > 0) {
+        // Confirm hand (v3.6): C held moves the right wrist to the
+        // action circle and holds it there. First half of confirmT:
+        // travel to the circle (blended from the current wrist, so
+        // no teleport); second half: hold on the circle. On release
+        // confirmT runs back down and the wrist returns to rest the
+        // same way. The press override below still wins if P and C
+        // are held together — a press is the more specific input.
+        let px: number;
+        let py: number;
+        if (this.confirmT <= 0.5) {
+          const t = this.confirmT / 0.5;
+          px = lerp(wrist.x, CONFIRM_TARGET.x, t);
+          py = lerp(wrist.y, CONFIRM_TARGET.y, t);
+        } else {
+          px = CONFIRM_TARGET.x;
+          py = CONFIRM_TARGET.y;
+        }
+        wrist = lm(px, py);
+        elbow = lm(
+          shoulder.x + (px - shoulder.x) * 0.55,
+          shoulder.y + (py - shoulder.y) * 0.55,
         );
       }
       if (this.pressT > 0) {

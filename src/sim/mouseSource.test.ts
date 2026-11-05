@@ -174,4 +174,81 @@ describe('MouseSource', () => {
       0.6 * body.torsoLength,
     );
   });
+
+  it('pointer hand (v3.6): the left wrist follows the mouse target', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    // Recipe card 1 centre, canvas (480, 188) -> video (0.5, 0.348).
+    source.setPointerHand({ x: 0.5, y: 188 / 540 });
+    const body = advanceTo(source, tracker, 900);
+    expect(body.leftWristX).toBeCloseTo(0.5, 1);
+    expect(body.leftWristY).toBeCloseTo(188 / 540, 1);
+    // The right wrist is untouched: still hanging at the side.
+    expect(body.rightWristY).toBeGreaterThan(body.torsoY);
+  });
+
+  it('pointer hand (v3.6): a held raise overrides the follow', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    source.setPointerHand({ x: 0.5, y: 188 / 540 });
+    source.setKeyArm('left', true);
+    const body = advanceTo(source, tracker, 900);
+    expect(body.leftArm.raised).toBe(true);
+    // Raised straight up, not at the pointer target.
+    expect(body.leftWristY).toBeLessThan(0.1);
+  });
+
+  it('pointer hand (v3.6): null target restores the hanging arm', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    source.setPointerHand({ x: 0.5, y: 188 / 540 });
+    advanceTo(source, tracker, 900);
+    source.setPointerHand(null);
+    const body = advanceTo(source, tracker, 1800, 916);
+    expect(body.leftWristY).toBeGreaterThan(body.torsoY);
+  });
+
+  it('confirm hand (v3.6): C held moves the right wrist to the action circle', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    source.setConfirming(true);
+    const body = advanceTo(source, tracker, 900);
+    // Action circle centre, canvas (888, 84) -> video (0.075, 0.1556).
+    expect(body.rightWristX).toBeCloseTo(1 - 888 / 960, 1);
+    expect(body.rightWristY).toBeCloseTo(84 / 540, 1);
+    // The left wrist is untouched: still hanging at the side.
+    expect(body.leftWristY).toBeGreaterThan(body.torsoY);
+  });
+
+  it('confirm hand (v3.6): release returns the right wrist to rest', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    source.setConfirming(true);
+    advanceTo(source, tracker, 900);
+    source.setConfirming(false);
+    const body = advanceTo(source, tracker, 1800, 916);
+    expect(body.rightWristY).toBeGreaterThan(body.torsoY);
+    expect(Math.abs(body.rightWristX - body.torsoX)).toBeLessThan(
+      0.6 * body.torsoLength,
+    );
+  });
+
+  it('press (P) wins over confirm (C) when both are held', () => {
+    const source = new MouseSource();
+    const tracker = new BodyStateTracker();
+    source.start(0);
+    source.setPressing(true);
+    source.setConfirming(true);
+    const body = advanceTo(source, tracker, 900);
+    const torso = body.torsoLength;
+    expect(body.leftWristX).toBeCloseTo(body.torsoX - 0.55 * torso, 1);
+    expect(body.rightWristX).toBeCloseTo(body.torsoX + 0.55 * torso, 1);
+    expect(body.leftWristY).toBeCloseTo(body.torsoY + 0.12 * torso, 1);
+    expect(body.rightWristY).toBeCloseTo(body.torsoY + 0.12 * torso, 1);
+  });
 });

@@ -61,6 +61,7 @@
  */
 
 import { BIX, RENDER } from '../core/config';
+import type { Selectable } from '../core/pointer';
 import { versionLabel } from '../core/version';
 import { assetUrl } from '../core/assetUrl';
 import {
@@ -517,6 +518,35 @@ export class TownHub {
   /** Action of the button under the pointer, or null. */
   public get hoveredButton(): string | null {
     return this.hoverAction;
+  }
+
+  /**
+   * Pointer-system selectables (v3.6): the hub buttons the hand
+   * pointer can hover + confirm — Mine, Refiner, Bix's shop, Back,
+   * and the Sell 1 / Sell all actions. The Reset button is NOT a
+   * selectable on purpose: wiping the save stays mouse-only (and
+   * two-tap). The buttons are rebuilt every render, so this reads
+   * the last rendered frame — one frame stale at most.
+   */
+  public selectables(): Selectable[] {
+    return this.buttons
+      .filter((b) => b.action !== 'reset')
+      .map((b) => ({ id: b.action, x: b.x, y: b.y, w: b.w, h: b.h }));
+  }
+
+  /**
+   * Pointer-system highlight (v3.6): the hand pointer hovering a
+   * button lights it exactly like the mouse hover does — same
+   * `hoverAction` field, same `paintButton` 'hover' state, so the
+   * two inputs can never disagree about what "highlighted" looks
+   * like. Pass null to clear (pointer left the button). The mouse
+   * path (`handlePointerMove`) writes the same field; in the mouse
+   * sim the two agree (the pointer hand follows the mouse), on a
+   * real camera the mouse never moves so only the hand writes it.
+   */
+  public setPointerHighlight(action: string | null): void {
+    if (!this.openFlag) return;
+    this.hoverAction = action;
   }
 
   /** Action of the button being pressed, or null. */

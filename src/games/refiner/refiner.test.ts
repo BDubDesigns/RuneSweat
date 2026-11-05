@@ -1,4 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+// @ts-expect-error — @types/node is not installed in this repo, so
+// node:fs has no type declarations; the import works at runtime
+// because vitest runs in node. Only used to grep the refiner source
+// for the deleted Leave chip.
+import { readFileSync as readFileSyncUntyped } from 'node:fs';
+/**
+ * Typed alias for the import above: the unresolved import is
+ * `error`-typed, so calling it directly trips the no-unsafe-* lint
+ * rules. The cast pins the one signature this test uses.
+ */
+const readFileSync: (path: string, encoding: 'utf8') => string =
+  readFileSyncUntyped as (path: string, encoding: 'utf8') => string;
 import { SoundEffects } from '../../core/audio';
 import { PRESS, SIM } from '../../core/config';
 import type { BodyState } from '../../core/bodyState';
@@ -12,7 +24,6 @@ import {
   RefinerGame,
   hopperLabelRect,
   hopperZoneForStage,
-  leaveChipRect,
   pedestalRectsForStage,
   pickerCardLayout,
   pileLabelRect,
@@ -21,7 +32,6 @@ import {
   simTorsoBox,
 } from './refiner';
 import { GATE_BANNER, gateBannerRect } from '../../render/renderer';
-import { BUTTON_STYLES } from '../../hub/townHub';
 
 const PILE = pileZoneForStage(960, 540);
 const HOPPER = hopperZoneForStage(960, 540);
@@ -378,12 +388,13 @@ describe('RefinerGame', () => {
     expect(game.snapshot().hopperFill).toBe(2);
     for (; t < 1300; t += 16) game.update(16, t, REST, null);
     expect(game.snapshot().pedestalSlideT).toBe(1);
-    // Leave chip: bottom-left, x 12..232, y 488..528.
+    // Leave via the action circle's town action (v3.6): the Leave
+    // chip is gone, so the coordinator calls leaveToHub directly.
     let left = false;
     game.onLeaveToHub = () => {
       left = true;
     };
-    expect(game.pointerDownAt(100, 508, 1500)).toBe(true);
+    game.leaveToHub(1500);
     expect(left).toBe(true);
     // Carried (0) + hopper (2) ore returns: 10 - 2 grabbed + 2 back.
     expect(inventory.count('ferrite-shale')).toBe(10);
@@ -398,7 +409,7 @@ describe('RefinerGame', () => {
     expect(game.snapshot().pedestalSlideT).toBe(0);
   });
 
-  it('leaving mid-batch returns the ore (pointer: Leave to town)', () => {
+  it('leaving mid-batch returns the ore (action circle: leaveToHub)', () => {
     inventory.add('ferrite-shale', 10);
     const game = new RefinerGame(new SoundEffects());
     game.start();
@@ -408,12 +419,13 @@ describe('RefinerGame', () => {
     let t = 0;
     for (; t < 300; t += 16) game.update(16, t, OVER_PILE, null);
     expect(game.snapshot().carrying).toBe(true);
-    // Leave chip: bottom-left, x 12..232, y 488..528.
+    // Leave via the action circle's town action (v3.6): the Leave
+    // chip is gone, so the coordinator calls leaveToHub directly.
     let left = false;
     game.onLeaveToHub = () => {
       left = true;
     };
-    expect(game.pointerDownAt(100, 508, 500)).toBe(true);
+    game.leaveToHub(500);
     expect(left).toBe(true);
     expect(inventory.count('ferrite-shale')).toBe(10);
     expect(game.snapshot().phase).toBe('pick');
@@ -430,30 +442,37 @@ describe('RefinerGame', () => {
     expect(() => game.render(ctx, 1000, OVER_PILE, null)).not.toThrow();
   });
 
-  it('the Leave chip uses the shared game-button look: gradient, rounded corners, no flat fillRect (v3.3)', () => {
+  it('the Leave chip is gone (v3.6): no chip drawn, no chip hit area', () => {
     const game = new RefinerGame(new SoundEffects());
     game.start();
     const rec = recordingContext();
+    // Picker frame + batch frame: neither draws the chip.
     game.render(rec.ctx, 1000, null, null);
-    // Leave chip: bottom-left, x 12..232, y 488..528.
-    const chipGradient = rec.gradients.find((g) => g.args[1] === 488);
-    expect(chipGradient).toBeDefined();
-    expect(chipGradient?.stops).toEqual([
-      { offset: 0, color: BUTTON_STYLES.secondary.top },
-      { offset: 1, color: BUTTON_STYLES.secondary.bottom },
-    ]);
-    expect(rec.calls.some((c) => c.method === 'arcTo')).toBe(true);
+    inventory.add('ferrite-shale', 5);
+    game.selectRecipe('refined-ferrite');
+    game.render(rec.ctx, 1000, REST, null);
     expect(
       rec.calls.some(
         (c) =>
-          c.method === 'fillRect' &&
-          c.args[0] === 12 &&
-          c.args[1] === 488 &&
-          c.args[2] === 220 &&
-          c.args[3] === 40,
+          c.method === 'fillText' &&
+          typeof c.args[0] === 'string' &&
+          c.args[0].includes('Leave to town'),
       ),
     ).toBe(false);
-    expect(rec.fillStyles).toContain(BUTTON_STYLES.secondary.lip);
+    // No button gradient at the chip's old rect (12, 488, 220x40):
+    // the refiner draws no gradients at all any more.
+    expect(rec.gradients.some((g) => g.args[1] === 488)).toBe(false);
+    expect(rec.gradients).toHaveLength(0);
+    // No hit area: a tap where the chip was does nothing.
+    let left = false;
+    game.onLeaveToHub = () => {
+      left = true;
+    };
+    expect(game.pointerDownAt(100, 508, 1500)).toBe(false);
+    expect(left).toBe(false);
+    // Grep-level: the chip's helpers are gone from the source.
+    const src = readFileSync('src/games/refiner/refiner.ts', 'utf8');
+    expect(src).not.toMatch(/leaveChipRect|drawLeaveChip|action: 'leave'/);
   });
 });
 
@@ -915,23 +934,15 @@ describe('RefinerGame picker cards (v3.2)', () => {
     expect(texts).toContain('Unlocks at Refining 5');
   });
 
-  it('the gate banner zone never covers the cards or the Leave chip', () => {
+  it('the gate banner zone never covers the cards (v3.6: the Leave chip is gone)', () => {
     const layout = pickerCardLayout(960, 540);
     const banner = gateBannerRect(960, 30 * 11);
     expect(banner.y + banner.h).toBe(GATE_BANNER.top + GATE_BANNER.height);
     for (const card of layout.cards) {
       expect(card.y).toBeGreaterThan(banner.y + banner.h);
     }
-    expect(layout.leave.y).toBeGreaterThan(banner.y + banner.h);
-    // Cards and Leave never overlap each other either.
-    for (const card of layout.cards) {
-      const overlapsLeave =
-        card.x < layout.leave.x + layout.leave.w &&
-        layout.leave.x < card.x + card.w &&
-        card.y < layout.leave.y + layout.leave.h &&
-        layout.leave.y < card.y + card.h;
-      expect(overlapsLeave).toBe(false);
-    }
+    // No leave chip in the layout any more.
+    expect('leave' in layout).toBe(false);
   });
 
   it('tap once selects, tap again starts; locked cards never start', () => {
@@ -1253,12 +1264,11 @@ describe('RefinerGame pedestals v3.5 (slim posts, small pads)', () => {
     }
   });
 
-  it('no pedestal rect intersects the pile label, hopper label, Leave chip, or torso box', () => {
+  it('no pedestal rect intersects the pile label, hopper label, or torso box', () => {
     // Worst-case labels: a full pile ("10 shown") with a two-digit
     // owned count is the widest the pile label gets.
     const pileLabel = pileLabelRect(W, H, 10, 99);
     const hopperLabel = hopperLabelRect(W, H, 2, 2);
-    const leave = leaveChipRect(W, H);
     const torso = simTorsoBox(W, H);
     for (const slideT of [1, 0.5]) {
       const rects = pedestalRectsForStage(W, H, 0.5, 0.55, 0.3, slideT);
@@ -1266,16 +1276,14 @@ describe('RefinerGame pedestals v3.5 (slim posts, small pads)', () => {
         for (const part of [side.button, side.post]) {
           expect(rectsIntersect(part, pileLabel)).toBe(false);
           expect(rectsIntersect(part, hopperLabel)).toBe(false);
-          expect(rectsIntersect(part, leave)).toBe(false);
           expect(rectsIntersect(part, torso)).toBe(false);
         }
       }
     }
     // The labels sit above their zones, clear of the pedestals'
-    // whole vertical run; the Leave chip is far left of both posts.
+    // whole vertical run.
     expect(pileLabel.y + pileLabel.h).toBeLessThanOrEqual(240);
     expect(hopperLabel.y + hopperLabel.h).toBeLessThanOrEqual(240);
-    expect(leave.x + leave.w).toBeLessThan(300);
   });
 
   it('the pile/hopper labels sit above their zones (v3.5), not below them', () => {

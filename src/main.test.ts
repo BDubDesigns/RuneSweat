@@ -327,11 +327,35 @@ describe('fullscreen toggle wiring', () => {
     expect(hudText()).toContain('Refining Lv');
     expect(pauseLabel()).toBe('🏠 Town');
 
-    // "Leave to town" chip: bottom-left, x 12..232, y 488..528.
-    dispatchCanvasTap(122, 508);
-    driveFrames(2);
+    // Dwell to town (v3.6): hold C — the right (confirm) hand
+    // travels to the top-right action circle and the 2 s dwell fires
+    // town mode (nothing is highlighted: the pointer is in the gap
+    // between the picker cards). The old bottom-left "Leave to town"
+    // chip is gone; this is the way out by hand now.
+    dispatchDocumentEvent('keydown', { key: 'c', repeat: false });
+    driveFrames(200);
+    dispatchDocumentEvent('keyup', { key: 'c' });
     // Swing Lab is restored and town is open again.
     expect(hudText()).toContain('Mining Lv');
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    // Let the confirm hand actually leave the circle (frames must
+    // run for it to travel back): the dwell disarms after firing
+    // until the hand leaves, and re-pressing with zero frames in
+    // between would never re-arm it.
+    driveFrames(30);
+
+    // And back out of town the same way from Swing Lab: Space
+    // returns to the mine, then a C dwell (nothing highlighted in
+    // the mine either — no selectables there) goes to town again.
+    dispatchDocumentEvent('keydown', {
+      key: ' ',
+      repeat: false,
+      preventDefault: () => {},
+    });
+    expect(pauseLabel()).toBe('🏠 Town');
+    dispatchDocumentEvent('keydown', { key: 'c', repeat: false });
+    driveFrames(200);
+    dispatchDocumentEvent('keyup', { key: 'c' });
     expect(pauseLabel()).toBe('⛏ Back to the mine');
   });
 
@@ -483,6 +507,98 @@ describe('fullscreen toggle wiring', () => {
     expect(inventory.count('refined-ferrite')).toBe(1);
     expect(inventory.xp('refining')).toBe(15);
     expect(hudText()).toContain('🔨 0/3');
+  });
+
+  it('hands-only loop (v3.6): point + C-confirm the recipe, carry, press x3', () => {
+    // State carried from the previous test: the refiner is active
+    // (batch done, back to carrying), town closed, 18 ferrite-shale
+    // and 1 refined-ferrite in stock. The whole loop below is hands
+    // only — mouse position = pointer hand, C hold = confirm hand —
+    // no taps on the cards, no Space.
+    const stage = elements.get('stage');
+    if (stage === undefined) throw new Error('stage missing');
+    expect(hudText()).toContain('Refining Lv');
+
+    // Dwell to town first: leaving abandons nothing (hopper is
+    // empty) and a fresh refiner opens on the picker.
+    dispatchDocumentEvent('keydown', { key: 'c', repeat: false });
+    driveFrames(200);
+    dispatchDocumentEvent('keyup', { key: 'c' });
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
+    expect(hudText()).toContain('Mining Lv');
+
+    // Back into town's Refiner spot: a fresh refiner, picker showing.
+    dispatchCanvasTap(714, 244);
+    driveFrames(3);
+    expect(hudText()).toContain('Refining Lv');
+    expect(pauseLabel()).toBe('🏠 Town');
+
+    // Point at the Refined Ferrite card (480, 188) with the mouse —
+    // the left (pointer) hand follows it onto the card.
+    dispatchCanvasPointerMove(480, 188);
+    driveFrames(10);
+    // First C dwell confirms the highlight: select the card.
+    dispatchDocumentEvent('keydown', { key: 'c', repeat: false });
+    driveFrames(200);
+    dispatchDocumentEvent('keyup', { key: 'c' });
+    driveFrames(10);
+    expect(hudText()).toContain('Refining Lv');
+    // Second C dwell confirms again: start the batch. (The dwell
+    // disarms after each fire until the hand leaves, so the two
+    // holds are separate — holding through a fire never double-fires.)
+    dispatchDocumentEvent('keydown', { key: 'c', repeat: false });
+    driveFrames(200);
+    dispatchDocumentEvent('keyup', { key: 'c' });
+    driveFrames(2);
+    expect(hudText()).toContain('Recipe: Refined Ferrite');
+
+    // Carry x2 (A+D clasp + pointer moves, as in the press test),
+    // then 3 P presses — the hands-only batch.
+    const grabAndDrop = (): void => {
+      dispatchDocumentEvent('keydown', { key: 'a', repeat: false });
+      dispatchDocumentEvent('keydown', { key: 'd', repeat: false });
+      driveFrames(10);
+      dispatchDocumentEvent('keyup', { key: 'a' });
+      dispatchDocumentEvent('keyup', { key: 'd' });
+      dispatchCanvasPointerMove(288, 319);
+      driveFrames(40);
+      dispatchCanvasPointerMove(672, 319);
+      driveFrames(25);
+    };
+    grabAndDrop();
+    expect(hudText()).toContain('Hopper 1/2');
+    grabAndDrop();
+    expect(hudText()).toContain('Hopper 2/2');
+    driveFrames(30);
+    for (let i = 0; i < 3; i++) {
+      dispatchDocumentEvent('keydown', { key: 'p', repeat: false });
+      driveFrames(90);
+      dispatchDocumentEvent('keyup', { key: 'p' });
+      if (i < 2) {
+        expect(hudText()).toContain(`🔨 ${i + 1}/3`);
+      }
+      dispatchDocumentEvent('keydown', { key: 'a', repeat: false });
+      dispatchDocumentEvent('keydown', { key: 'd', repeat: false });
+      driveFrames(18);
+      dispatchDocumentEvent('keyup', { key: 'a' });
+      dispatchDocumentEvent('keyup', { key: 'd' });
+      driveFrames(42);
+    }
+    expect(inventory.count('refined-ferrite')).toBe(2);
+    expect(inventory.xp('refining')).toBe(30);
+    expect(hudText()).toContain('🔨 0/3');
+  });
+
+  it('a mouse click on the action circle goes to town (v3.6)', () => {
+    // State carried from the previous test: the refiner is active
+    // (batch done, carrying), town closed. Clicking the top-right
+    // circle (888, 84) fires town mode at once — no dwell needed
+    // for the mouse.
+    expect(hudText()).toContain('Refining Lv');
+    dispatchCanvasTap(888, 84);
+    driveFrames(2);
+    expect(hudText()).toContain('Mining Lv');
+    expect(pauseLabel()).toBe('⛏ Back to the mine');
   });
 });
 });

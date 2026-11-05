@@ -464,3 +464,81 @@ describe('TownHub', () => {
     }
   });
 });
+
+describe('TownHub pointer selectables (v3.6)', () => {
+  function setup() {
+    const calls: string[] = [];
+    const hub = new TownHub({
+      onLeaveTown: () => calls.push('leave-town'),
+      onOpenMine: () => calls.push('mine'),
+      onOpenRefiner: () => calls.push('refiner'),
+      onReset: () => calls.push('reset'),
+    });
+    const ctx = stubContext();
+    return { hub, ctx, calls };
+  }
+
+  it('main screen selectables are the activity buttons + Back — never Reset', () => {
+    const { hub, ctx } = setup();
+    expect(hub.selectables()).toEqual([]);
+    hub.open();
+    hub.render(ctx, 1000);
+    const ids = hub.selectables().map((s) => s.id);
+    expect(ids).toContain('mine');
+    expect(ids).toContain('refiner');
+    expect(ids).toContain('shop');
+    expect(ids).toContain('leave-town');
+    expect(ids).not.toContain('reset');
+    // Rects match the buttons they describe.
+    const mine = hub.selectables().find((s) => s.id === 'mine');
+    expect(mine).toEqual({ id: 'mine', x: 492, y: 156, w: 444, h: 52 });
+  });
+
+  it('shop screen selectables are Sell 1 / Sell all + Back to town', () => {
+    const { hub, ctx } = setup();
+    inventory.add('ferrite-shale', 2);
+    hub.open();
+    hub.render(ctx, 1000);
+    expect(hub.handlePointer(600, 306)).toBe(true);
+    expect(hub.currentScreen).toBe('shop');
+    hub.render(ctx, 1000);
+    const ids = hub.selectables().map((s) => s.id);
+    expect(ids).toContain('sell-one:ferrite-shale');
+    expect(ids).toContain('sell-all:ferrite-shale');
+    expect(ids).toContain('sell-one:galvanic-stock');
+    expect(ids).toContain('shop-back');
+    expect(ids).not.toContain('reset');
+  });
+
+  it('setPointerHighlight lights the button exactly like a mouse hover', () => {
+    const { hub } = setup();
+    const rec = recordingContext();
+    hub.open();
+    hub.render(rec.ctx, 1000);
+    hub.setPointerHighlight('mine');
+    expect(hub.hoveredButton).toBe('mine');
+    rec.gradients.length = 0;
+    hub.render(rec.ctx, 1000);
+    const hovered = rec.gradients.find((g) => g.args[1] === 156);
+    expect(hovered?.stops).toEqual([
+      { offset: 0, color: BUTTON_STYLES.primary.hoverTop },
+      { offset: 1, color: BUTTON_STYLES.primary.hoverBottom },
+    ]);
+    // Clearing the highlight returns the button to idle gold.
+    hub.setPointerHighlight(null);
+    expect(hub.hoveredButton).toBe(null);
+    rec.gradients.length = 0;
+    hub.render(rec.ctx, 1000);
+    const idle = rec.gradients.find((g) => g.args[1] === 156);
+    expect(idle?.stops).toEqual([
+      { offset: 0, color: BUTTON_STYLES.primary.top },
+      { offset: 1, color: BUTTON_STYLES.primary.bottom },
+    ]);
+  });
+
+  it('setPointerHighlight does nothing while the hub is closed', () => {
+    const { hub } = setup();
+    hub.setPointerHighlight('mine');
+    expect(hub.hoveredButton).toBe(null);
+  });
+});

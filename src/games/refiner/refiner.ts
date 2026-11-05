@@ -32,10 +32,17 @@
  *   that covered the pile/hopper labels and the Leave chip, with no
  *   distinct button. Now each pedestal is a slim post with a small
  *   pad that IS the detection zone, at resting-hand height beside
- *   the body — see `pedestalRectsForStage`.
+ *   the body — see `pedestalRectsForStage`. (v3.6 deleted the Leave
+ *   chip entirely: it sat behind the left pad in the v3.5 playtest
+ *   video, and the top-right action circle replaces it.)
  * - After a batch, keep carrying (if you own more ore) or leave to
  *   the hub. Leaving mid-batch ABANDONS it and the carried + hopper
  *   ore returns to inventory — nothing is ever lost to a pause.
+ *   Leaving is the top-right action circle (v3.6): the old
+ *   bottom-left "Leave to town" chip is gone — it sat half-hidden
+ *   behind the left press pad in every frame of Brandon's v3.5
+ *   playtest video, so the chip was deleted and the circle (dwell
+ *   or mouse click) is the only way out by hand.
  *
  * Failure -> Slag is NOT built: the active refiner always succeeds.
  *
@@ -49,14 +56,14 @@
  * It reads `BodyState` only (via the machine + the press detector)
  * and the shared `inventory` store — no constructor changes:
  * `new RefinerGame(sfx)`. The coordinator wires leaving:
- * set `game.onLeaveToHub = () => ...` (called when the player taps
- * "Leave to town"); the game itself abandons the batch first.
+ * set `game.onLeaveToHub = () => ...` (called when the player
+ * leaves via the top-right action circle — see `leaveToHub`);
+ * the game itself abandons the batch first.
  */
 
 import { PRESS, REFINER, RENDER, SIM, STAGE, SWING } from '../../core/config';
 import type { SoundEffects } from '../../core/audio';
 import { assetUrl } from '../../core/assetUrl';
-import { paintButton } from '../../hub/townHub';
 import type { BodyState } from '../../core/bodyState';
 import { PressDetector, pressButtonZones, type PressRect } from '../../core/pressDetector';
 import { inventory } from '../../core/inventory';
@@ -131,10 +138,9 @@ export function rectsIntersect(a: RefinerZone, b: RefinerZone): boolean {
 /**
  * Pile / hopper labels sit this far ABOVE their zones (v3.5): the
  * pedestal posts run from the buttons all the way to the stage
- * bottom, so a label below the zones would sit right across a post
- * (v3.4: the slabs covered the "Hopper: 2/2" label and the top edge
- * of the "Leave to town" chip). Above the zones the labels clear
- * everything — the title banner is far above, the buttons far below.
+ * bottom, so a label below the zones would sit right across a post.
+ * Above the zones the labels clear everything — the title banner is
+ * far above, the buttons far below.
  * 16 px (not 14): the 30 px estimate rect in `textLabelRect` must
  * clear the zone top, not just the real glyphs.
  */
@@ -192,12 +198,6 @@ export function hopperLabelRect(
     hopper.y - LABEL_ABOVE_PX,
     hopperLabelText(fill, capacity),
   );
-}
-
-/** Canvas rect of the "Leave to town" chip for a stage. */
-export function leaveChipRect(width: number, height: number): RefinerZone {
-  const leave = pickerCardLayout(width, height).leave;
-  return { x: leave.x, y: leave.y, w: leave.w, h: leave.h };
 }
 
 /**
@@ -321,10 +321,11 @@ export function pedestalRectsForStage(
  *
  * Cards are 640 x 96 — big tap targets — stacked from y 140 with a
  * 16 px gap, so two cards end at y 348: clear of the gate banner
- * (bottom y 40, see `GATE_BANNER` in `render/renderer.ts`) and clear
- * of the "Leave to town" chip (top y 488). The footer note sits
- * below the cards. Pure, so tests can assert the zones never overlap
- * without a canvas.
+ * (bottom y 40, see `GATE_BANNER` in `render/renderer.ts`). The
+ * footer note sits below the cards. Pure, so tests can assert the
+ * zones never overlap without a canvas. (v3.6: the bottom-left
+ * "Leave to town" chip that used to sit at y 488 is deleted — the
+ * top-right action circle replaces it.)
  */
 export const PICKER_CARD = {
   w: 640,
@@ -342,17 +343,21 @@ export interface PickerCardRect {
   recipeId: string;
 }
 
-/** Whole picker layout for a stage: cards, title lines, footer, leave. */
+/** Whole picker layout for a stage: cards, title lines, footer. */
 export interface PickerLayout {
   titleY: number;
   subtitleY: number;
   cards: PickerCardRect[];
   /** First footer line (selection hint); a second line follows +28. */
   footerY: number;
-  leave: { x: number; y: number; w: number; h: number };
 }
 
-export function pickerCardLayout(width: number, height: number): PickerLayout {
+export function pickerCardLayout(width: number, _height: number): PickerLayout {
+  // `_height` is unused since the v3.6 chip deletion: the layout is
+  // top-anchored (title 60, cards from 140), nothing sits at the
+  // stage bottom any more. The parameter stays so the (width, height)
+  // call shape — and the footer placement it may serve again — does
+  // not churn every caller.
   const x = Math.round(width / 2 - PICKER_CARD.w / 2);
   return {
     titleY: 60,
@@ -368,7 +373,6 @@ export function pickerCardLayout(width: number, height: number): PickerLayout {
       PICKER_CARD.top +
       REFINING_RECIPES.length * (PICKER_CARD.h + PICKER_CARD.gap) +
       10,
-    leave: { x: 12, y: height - 52, w: 220, h: 40 },
   };
 }
 
@@ -431,10 +435,11 @@ export class RefinerGame implements Game {
   public paused = false;
 
   /**
-   * Coordinator hook: called when the player taps "Leave to town"
-   * (after the batch is abandoned). `main.ts` sets this to switch
-   * back to Swing Lab + open the hub. Null = leaving does nothing
-   * (the game just returns to its picker).
+   * Coordinator hook: called when the player leaves via the
+   * top-right action circle (see `leaveToHub`), after the batch is
+   * abandoned. `main.ts` sets this to switch back to Swing Lab +
+   * open the hub. Null = leaving does nothing (the game just
+   * returns to its picker).
    */
   public onLeaveToHub: (() => void) | null = null;
 
@@ -467,8 +472,8 @@ export class RefinerGame implements Game {
   private lastTorsoLength: number = SIM.torsoLength;
   private leaveRequested = false;
   /**
-   * Recipe-picker cards + leave chip, recomputed every render.
-   * `action` is `'leave'` or `'recipe:<id>'`.
+   * Recipe-picker cards, recomputed every render.
+   * `action` is `'recipe:<id>'`.
    */
   private cardRects: {
     x: number;
@@ -557,17 +562,19 @@ export class RefinerGame implements Game {
   /**
    * Canvas-space pointer tap. A tap on a recipe card selects it (or
    * starts the batch on the second tap); a tap on a locked card does
-   * nothing — its lock reason is printed on the card itself. A tap on
-   * "Leave to town" abandons the batch and fires `onLeaveToHub`.
+   * nothing — its lock reason is printed on the card itself.
+   * Leaving is NOT a tap here any more (v3.6): the "Leave to town"
+   * chip is deleted, and the coordinator calls `leaveToHub` from the
+   * top-right action circle instead.
    */
-  public pointerDownAt(x: number, y: number, nowMs: number): boolean {
+  public pointerDownAt(x: number, y: number, _nowMs: number): boolean {
+    // `_nowMs` is unused since the v3.6 chip deletion: the only
+    // time-dependent branch was the Leave tap. The parameter stays
+    // so the tap signature matches Swing Lab's `pointerDownAt` and
+    // the coordinator's call shape does not churn.
     for (const card of this.cardRects) {
       if (x < card.x || x > card.x + card.w || y < card.y || y > card.y + card.h) {
         continue;
-      }
-      if (card.action === 'leave') {
-        this.requestLeave(nowMs);
-        return true;
       }
       if (card.action.startsWith('recipe:')) {
         const id = card.action.slice('recipe:'.length);
@@ -587,6 +594,21 @@ export class RefinerGame implements Game {
       }
     }
     return false;
+  }
+
+  /**
+   * Leave for town (v3.6): the top-right action circle's town action.
+   * Abandons the live batch (carried + hopper ore returns to
+   * inventory) and fires `onLeaveToHub` — the coordinator restores
+   * the suspended Swing Lab and opens the hub. This replaces the
+   * deleted "Leave to town" chip's tap path; nothing else calls it.
+   */
+  public leaveToHub(nowMs: number): void {
+    this.machine.leave();
+    this.lastNowMs = nowMs;
+    this.trackPedestals('pick', nowMs);
+    this.leaveRequested = true;
+    if (this.onLeaveToHub !== null) this.onLeaveToHub();
   }
 
   public start(): void {
@@ -748,11 +770,10 @@ export class RefinerGame implements Game {
     this.drawPile(ctx, pile, snap, nowMs);
     this.drawHopper(ctx, hopper, snap, nowMs);
     this.drawCarriedOre(ctx, body, width, height, snap);
-    // Pedestals after the pile/hopper, before the Leave chip — they
-    // never cover the Leave control.
     this.drawPedestals(ctx, width, height, body, nowMs);
     this.drawProgress(ctx, snap, width, height, nowMs);
-    this.drawLeaveChip(ctx, width, height);
+    // No Leave chip here any more (v3.6): leaving is the top-right
+    // action circle, drawn by main.ts — the game draws no exit UI.
     // No "step into frame" text here: the gate owns that message (a
     // small top banner while an activity screen is up — see
     // `drawGateBanner`), and a mid-stage line would sit on top of the
@@ -805,14 +826,6 @@ export class RefinerGame implements Game {
       }
       this.sfx.win();
     }
-  }
-
-  private requestLeave(nowMs: number): void {
-    this.machine.leave();
-    this.lastNowMs = nowMs;
-    this.trackPedestals('pick', nowMs);
-    this.leaveRequested = true;
-    if (this.onLeaveToHub !== null) this.onLeaveToHub();
   }
 
   /**
@@ -969,7 +982,6 @@ export class RefinerGame implements Game {
       width / 2,
       layout.footerY + 28,
     );
-    this.drawLeaveChip(ctx, width, height);
     ctx.restore();
   }
 
@@ -1281,24 +1293,6 @@ export class RefinerGame implements Game {
     ctx.fillText(text, width / 2, 58);
     void height;
     ctx.restore();
-  }
-
-  private drawLeaveChip(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-  ): void {
-    const { x, y, w, h } = pickerCardLayout(width, height).leave;
-    // Picker render resets cardRects; the game render appends to it —
-    // keep exactly one leave chip by replacing any previous one.
-    this.cardRects = this.cardRects.filter((c) => c.action !== 'leave');
-    this.cardRects.push({ x, y, w, h, action: 'leave' });
-    // Same game-button look as the town hub (secondary style):
-    // opaque gradient, darker lip, rounded corners, drop shadow —
-    // not the old flat rectangle. (No hover/pressed state: the
-    // refiner has no pointermove path; it draws idle.)
-    paintButton(ctx, x, y, w, h, '⬅ Leave to town', 'secondary', 'idle', 20);
-    void width;
   }
 
   private attachPointerListener(canvas: HTMLCanvasElement): void {

@@ -19,6 +19,11 @@ import {
   avatarJoints,
   bottomsGeometry,
   faceGeometry,
+  forearmEndPoint,
+  HAND_CIRCLE_OUTLINE,
+  HAND_CIRCLE_RADIUS_TORSO_FRAC,
+  handCircleGeometry,
+  handCircleRadiusPx,
   hardHatGeometry,
   headGeometry,
   headRadiusPx,
@@ -497,6 +502,86 @@ describe('bottomsGeometry (v3.3: two cuffs with a notch)', () => {
   });
 });
 
+describe('handCircleGeometry (v3.6: the circle IS the hand and the hitbox)', () => {
+  it('circle centres equal the wrist joints, radius is fist-sized (0.125 torso)', () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const circles = handCircleGeometry(joints);
+    // Centres: exactly the wrist landmarks (the same smoothed
+    // position the detectors use — no offset, no guesswork).
+    expect(circles.left.centre).toEqual(joints.leftWrist);
+    expect(circles.right.centre).toEqual(joints.rightWrist);
+    // Radius: 0.125 torso lengths each — 0.25 across, the same
+    // width as a press pad, fist-sized.
+    expect(HAND_CIRCLE_RADIUS_TORSO_FRAC).toBeCloseTo(0.125);
+    expect(circles.left.r).toBeCloseTo(joints.torsoLengthPx * 0.125, 6);
+    expect(circles.right.r).toBe(circles.left.r);
+    expect(circles.left.r * 2).toBeCloseTo(joints.torsoLengthPx * 0.25, 6);
+    // Bigger than the old hand dot (limbW * 0.55 = 0.088 torso):
+    // the old dot read as the arm's rounded tip, not a hand.
+    expect(circles.left.r).toBeGreaterThan(limbWidthPx(joints.torsoLengthPx) * 0.55);
+  });
+
+  it('handCircleRadiusPx scales with the body', () => {
+    expect(handCircleRadiusPx(162)).toBeCloseTo(20.25, 6);
+    expect(handCircleRadiusPx(0)).toBe(0);
+    expect(handCircleRadiusPx(324)).toBeCloseTo(40.5, 6);
+  });
+
+  it('the two circles are apart — one per hand, not one blob', () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const circles = handCircleGeometry(joints);
+    const gap = Math.hypot(
+      circles.right.centre.x - circles.left.centre.x,
+      circles.right.centre.y - circles.left.centre.y,
+    );
+    expect(gap).toBeGreaterThan(circles.left.r + circles.right.r);
+  });
+});
+
+describe('forearmEndPoint (v3.6: the capsule terminates at the circle)', () => {
+  it('the forearm ends 0.5 hand-radii back from the wrist, on the elbow-wrist line', () => {
+    const pose = makePose();
+    const joints = avatarJoints(pose, 960, 540);
+    expect(joints).not.toBeNull();
+    if (joints === null) return;
+    const handR = handCircleRadiusPx(joints.torsoLengthPx);
+    for (const [elbow, wrist] of [
+      [joints.leftElbow, joints.leftWrist],
+      [joints.rightElbow, joints.rightWrist],
+    ] as const) {
+      const end = forearmEndPoint(elbow, wrist, handR);
+      // On the elbow -> wrist segment, 0.5r short of the wrist.
+      expect(Math.hypot(end.x - wrist.x, end.y - wrist.y)).toBeCloseTo(handR * 0.5, 6);
+      // Collinear: cross product of (wrist - elbow) and (end - elbow) ~ 0.
+      const cross =
+        (wrist.x - elbow.x) * (end.y - elbow.y) -
+        (wrist.y - elbow.y) * (end.x - elbow.x);
+      expect(Math.abs(cross)).toBeLessThan(1);
+      // Between elbow and wrist (not past either end).
+      const along =
+        ((end.x - elbow.x) * (wrist.x - elbow.x) +
+          (end.y - elbow.y) * (wrist.y - elbow.y)) /
+        (Math.hypot(wrist.x - elbow.x, wrist.y - elbow.y) ** 2);
+      expect(along).toBeGreaterThan(0);
+      expect(along).toBeLessThan(1);
+      // The round cap's tip (end + half the forearm width along the
+      // arm direction) still lands INSIDE the hand circle, so no
+      // rounded tip floats past the wrist: cap tip is wrist − 0.5r
+      // + 0.072 torso, i.e. ~0.01 torso past the wrist, well inside
+      // the 0.125-torso circle.
+      const halfW = limbWidthPx(joints.torsoLengthPx) * 0.9 / 2;
+      const capTipDist = Math.abs(handR * 0.5 - halfW);
+      expect(capTipDist).toBeLessThan(handR);
+    }
+  });
+});
+
 describe('resolveOutfit', () => {
   it('defaults to the mining outfit (white tank, heart boxers, hard hat)', () => {
     const outfit = resolveOutfit();
@@ -602,5 +687,67 @@ describe('AvatarRenderer.draw', () => {
     // bottoms — the near leg is drawn before the cuffs, not over them.
     const between = fillStyles.slice(topIdx + 1, bottomsIdx);
     expect(between).toContain(OUTFIT.skin.tone);
+  });
+
+  it('draws a hand circle at each wrist AFTER the arm capsules, filled + outlined (v3.6)', () => {
+    const renderer = new AvatarRenderer();
+    const { ctx, calls } = recordingContext();
+    const pose = makePose({ leftArmDeg: 10, rightArmDeg: -10 });
+    renderer.draw(ctx, pose, 960, 540, OUTFIT, 1000);
+
+    const joints = avatarJoints(pose, 960, 540);
+    if (joints === null) throw new Error('fixture pose incomplete');
+    const handR = handCircleRadiusPx(joints.torsoLengthPx);
+    const close = (a: number, b: number): boolean => Math.abs(a - b) < 1.5;
+
+    // All arc() calls, in draw order.
+    const arcs = calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.method === 'arc')
+      .map(({ c, i }) => ({
+        i,
+        x: c.args[0] as number,
+        y: c.args[1] as number,
+        r: c.args[2] as number,
+      }));
+    // The hand circles: radius handR, centred on the wrists. (The
+    // head is headR, the dome 1.02 * headR, the eyes 0.15 * headR,
+    // the smile 0.30 * headR — none matches handR. First frame, so
+    // the smoothing is the identity and the drawn wrists equal the
+    // raw joints.)
+    const handArcs = arcs.filter(
+      (a) =>
+        close(a.r, handR) &&
+        ((close(a.x, joints.leftWrist.x) && close(a.y, joints.leftWrist.y)) ||
+          (close(a.x, joints.rightWrist.x) && close(a.y, joints.rightWrist.y))),
+    );
+    expect(handArcs).toHaveLength(2);
+    for (const hand of handArcs) {
+      // Drawn AFTER the arm capsules: the nearest lineTo before
+      // the circle is the forearm segment, and it ends inside the
+      // circle (0.5 hand-radii back from the wrist) — the capsule
+      // terminates at the circle, it does not poke past the wrist.
+      let lineToIdx = -1;
+      for (let k = hand.i - 1; k >= 0; k -= 1) {
+        if (calls[k]?.method === 'lineTo') {
+          lineToIdx = k;
+          break;
+        }
+      }
+      expect(lineToIdx).toBeGreaterThanOrEqual(0);
+      expect(lineToIdx).toBeLessThan(hand.i);
+      const lineTo = calls[lineToIdx];
+      const endDist = Math.hypot(
+        (lineTo?.args[0] as number) - hand.x,
+        (lineTo?.args[1] as number) - hand.y,
+      );
+      expect(endDist).toBeLessThan(handR);
+      // Filled in skin, then stroked with the dark outline — the
+      // circle reads as a hand, distinct from the arm capsule.
+      expect(calls[hand.i + 1]?.method).toBe('fill');
+      expect(calls[hand.i + 2]?.method).toBe('stroke');
+    }
+    // The outline colour is a real dark tone, not the skin tone.
+    expect(HAND_CIRCLE_OUTLINE).not.toBe(OUTFIT.skin.tone);
   });
 });

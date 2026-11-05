@@ -14,13 +14,15 @@
  * The buttons live in **normalized video space** (the same space as
  * `BodyState` wrist X/Y, 0..1), placed relative to the body's stance
  * so they follow the player: centre at hip-mid ± 0.55 torso lengths
- * horizontally, top at the hip line + 0.02 torso, 0.25 wide × 0.2
- * tall (torso lengths). v3.5 moved them in from ±0.8 and shrank
- * them from 0.5 × 0.4 (v3.4): Brandon's playtest verdict was giant
- * slabs at the far bottom corners, too far to reach, no distinct
- * button. The new zones sit where the hands already hang — the
- * sim body's resting wrists are at hip-mid ±0.567 torso and hip +
- * 0.048 torso — so the press is a short downward push from rest.
+ * horizontally, top at the hip line − 0.06 torso, 0.25 wide × 0.32
+ * tall (torso lengths). v3.6 moved them up from hip + 0.02 and made
+ * them taller than v3.5's 0.2: Brandon's v3.5 playtest showed the
+ * pads at knee height at the very bottom of the stage while his
+ * hands hung at hip/thigh height, counter 0/3 the whole video. The
+ * new zones sit where the hands already hang — the sim body's
+ * resting wrists are at hip-mid ±0.567 torso and hip + 0.048
+ * torso — so the resting wrist sits ~0.108 torso below the zone
+ * top and a 0.1-torso push ends ~0.112 torso above the bottom.
  * See `PRESS` in `core/config.ts` for the numbers and why.
  * `pressButtonZones` is pure so the game renders the same zones
  * it detects against.
@@ -55,10 +57,12 @@ export interface PressWrist {
  * Pure zone placement: the two button zones for a body standing at
  * (`hipMidX`, `hipMidY`) with torso length `torsoLength` (all
  * normalized video space). Left centre at hip-mid − 0.55 torso,
- * right centre at hip-mid + 0.55 torso, tops at the hip line +
- * 0.02 torso, each zone 0.25 wide × 0.2 tall in torso lengths —
- * fist-sized buttons at resting hand height (v3.5; was ±0.8,
- * hip − 0.15, 0.5 × 0.4 in v3.4).
+ * right centre at hip-mid + 0.55 torso, tops at the hip line −
+ * 0.06 torso, each zone 0.25 wide × 0.32 tall in torso lengths —
+ * fist-wide buttons at waist/hip height, tall enough for the
+ * ~0.1-torso downward push with slack both ends (v3.6; was ±0.8,
+ * hip − 0.15, 0.5 × 0.4 in v3.4, and hip + 0.02, 0.25 × 0.2
+ * in v3.5).
  */
 export function pressButtonZones(
   hipMidX: number,

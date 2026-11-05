@@ -22,7 +22,20 @@
 import './styles.css';
 
 import replayFixture from '../fixtures/replay-sweep.json';
-import { GAMES, LOOP, OUTFIT, SOURCE_SELECTION, STAGE } from './core/config';
+import { GAMES, LOOP, OUTFIT, SIM, SOURCE_SELECTION, STAGE } from './core/config';
+import {
+  ActionButtonDwell,
+  actionButtonGeometry,
+  pointInActionCircle,
+  type ActionButtonMode,
+} from './core/actionButton';
+import { inventory } from './core/inventory';
+import {
+  PointerController,
+  confirmHandPoint,
+  pointerHandPoint,
+  type Selectable,
+} from './core/pointer';
 import { startCamera, stopCamera, CameraError } from './core/camera';
 import { SoundEffects } from './core/audio';
 import { BodyStateTracker, type BodyState } from './core/bodyState';
@@ -37,11 +50,14 @@ import {
 } from './core/gate';
 import { createFixedStepLoop } from './core/loop';
 import { drawHud, type HudReadout } from './debug/hud';
-import { syncCanvasBackingStore, toNormalized, type Vec2 } from './render/stage';
-import { AvatarRenderer } from './render/avatar';
+import { syncCanvasBackingStore, toCanvas, toNormalized, type Vec2 } from './render/stage';
+import { AvatarRenderer, handCircleRadiusPx } from './render/avatar';
 import {
+  drawActionButton,
   drawBlockingOverlay,
   drawGateBanner,
+  drawHoverRing,
+  drawPointerCursor,
   drawSkeleton,
   drawStageBackground,
   drawVideoMirrored,
@@ -56,7 +72,8 @@ import { parseReplayClip, ReplaySource } from './sim/replaySource';
 import { versionLabel } from './core/version';
 import type { Game, GameConstructor } from './games/game';
 import { SwingLabGame } from './games/swing-lab/swingLab';
-import { RefinerGame } from './games/refiner/refiner';
+import { RefinerGame, pickerCardLayout } from './games/refiner/refiner';
+import { REFINING_RECIPES, recipeLockReason } from './games/refiner/recipes';
 import { TownHub } from './hub/townHub';
 
 const GAME_CONSTRUCTORS: Record<string, GameConstructor> = {
@@ -339,6 +356,29 @@ function main(): void {
   let suspendedGame: Game | null = null;
 
   /**
+   * Hand-pointer system (v3.6): left hand points, right hand
+   * confirms (see `POINTER` in `core/config.ts`). The controller
+   * owns "what is hovered"; the dwell owns the 2 s hold on the
+   * action circle. `lastPointerCanvas` is the mouse position in
+   * canvas space — in the mouse sim the pointer IS the mouse (the
+   * sim's left wrist follows it visually, with lag, so reading the
+   * mouse keeps the hover exact); on camera the pointer is the
+   * smoothed left wrist. `lastActionCircle` is the circle state
+   * from the last update — render and mouse clicks read it.
+   */
+  const pointer = new PointerController();
+  const actionDwell = new ActionButtonDwell();
+  let lastPointerCanvas: Vec2 | null = null;
+  let lastPointerPoint: Vec2 | null = null;
+  /** Game-clock ms of the last update step (for mouse-click actions). */
+  let lastFrameNowMs = 0;
+  let lastActionCircle: {
+    visible: boolean;
+    mode: ActionButtonMode;
+    geometry: { cx: number; cy: number; r: number };
+  } | null = null;
+
+  /**
    * Label for the way back out of town (v3.2): Space, the Town
    * button while town is open, and the hub's own Back button all
    * return to the last activity, and all three say the same thing.
@@ -346,6 +386,182 @@ function main(): void {
   function returnLabelFor(game: Game | null): string {
     if (game instanceof RefinerGame) return '🔥 Back to refining';
     return '⛏ Back to the mine';
+  }
+
+  /**
+   * Refiner picker selectables (v3.6): the recipe cards the hand
+   * pointer can hover + confirm. Locked cards are NOT selectable —
+   * a confirm on one would do nothing, so the pointer never offers
+   * it. Layout comes from the refiner's own pure helper, so the
+   * hover rects are exactly the drawn cards.
+   */
+  function refinerPickerSelectables(): Selectable[] {
+    if (!(activeGame instanceof RefinerGame)) return [];
+    if (activeGame.snapshot().phase !== 'pick') return [];
+    const level = inventory.level('refining');
+    const layout = pickerCardLayout(STAGE.width, STAGE.height);
+    return layout.cards
+      .filter((card) => {
+        const recipe = REFINING_RECIPES.find((r) => r.id === card.recipeId);
+        if (recipe === undefined) return false;
+        return (
+          recipeLockReason(
+            recipe,
+            level,
+            inventory.count(recipe.inputItemId),
+          ) === null
+        );
+      })
+      .map((card) => ({
+        id: `recipe:${card.recipeId}`,
+        x: card.x,
+        y: card.y,
+        w: card.w,
+        h: card.h,
+      }));
+  }
+
+  /** Selectables on the current screen: hub buttons, or picker cards. */
+  function currentSelectables(): Selectable[] {
+    if (townHub.isOpen) return townHub.selectables();
+    return refinerPickerSelectables();
+  }
+
+  /**
+   * The action circle fired — by a full 2 s dwell or a mouse click
+   * on it. OK mode with something highlighted clicks it: a synthetic
+   * tap at the thing's centre, so the hand path runs the exact same
+   * code as a mouse tap (select-then-start for recipe cards,
+   * down+up for hub buttons). Town mode (in an activity, nothing
+   * highlighted) goes to town: the refiner abandons its batch first
+   * via `leaveToHub`, Swing Lab just toggles. OK mode with nothing
+   * highlighted cannot happen (the mode follows the hover) and does
+   * nothing if it ever does.
+   */
+  function fireActionButton(mode: ActionButtonMode, nowMs: number): void {
+    const hovered = pointer.hoveredSelectable;
+    if (mode === 'ok' && hovered !== null) {
+      const cx = hovered.x + hovered.w / 2;
+      const cy = hovered.y + hovered.h / 2;
+      if (townHub.isOpen) {
+        townHub.handlePointer(cx, cy);
+      } else if (activeGame instanceof RefinerGame) {
+        activeGame.pointerDownAt(cx, cy, nowMs);
+      }
+      return;
+    }
+    if (mode === 'town') {
+      if (activeGame instanceof RefinerGame) {
+        activeGame.leaveToHub(nowMs);
+      } else if (activeGame !== null) {
+        pause.toggleManual();
+      }
+    }
+  }
+
+  /**
+   * Pointer + action button, once per update step (v3.6). Runs even
+   * while gated, so a lost body clears the hover instead of leaving
+   * it stale — the point is null when the gate is closed.
+   *
+   * Circle visibility: in an activity it is always there (town mode,
+   * or ok mode while hovering); in town it only appears while
+   * something is hovered (ok mode — there is no town to go to from
+   * town); anywhere else it is hidden and the dwell resets.
+   */
+  function updatePointerSystem(nowMs: number): void {
+    lastFrameNowMs = nowMs;
+    const inActivity = activeGame !== null && !townHub.isOpen;
+    const inTown = townHub.isOpen && activeGame !== null;
+    let point: Vec2 | null = null;
+    if (!currentGate.gated) {
+      if (activeSource === mouse && lastPointerCanvas !== null) {
+        point = lastPointerCanvas;
+      } else if (latestBody !== null && latestBody.present) {
+        const wrist = pointerHandPoint(latestBody);
+        point = toCanvas(
+          { x: wrist.x, y: wrist.y, visibility: 1 },
+          canvas.width,
+          canvas.height,
+        );
+      }
+    }
+    lastPointerPoint = point;
+    pointer.update(point, inActivity || inTown ? currentSelectables() : []);
+    if (townHub.isOpen) {
+      townHub.setPointerHighlight(pointer.hoveredId);
+    }
+    const hovered = pointer.hoveredSelectable;
+    const geometry = actionButtonGeometry(canvas.width, canvas.height);
+    const visible = inActivity || (inTown && hovered !== null);
+    const mode: ActionButtonMode = hovered !== null ? 'ok' : 'town';
+    lastActionCircle = { visible, mode, geometry };
+    if (!visible) {
+      actionDwell.reset();
+      return;
+    }
+    // Dwell: the confirm hand inside the circle. No body, no dwell.
+    let inside = false;
+    if (!currentGate.gated && latestBody !== null && latestBody.present) {
+      const confirm = confirmHandPoint(latestBody);
+      const p = toCanvas(
+        { x: confirm.x, y: confirm.y, visibility: 1 },
+        canvas.width,
+        canvas.height,
+      );
+      inside = pointInActionCircle(p.x, p.y, geometry);
+    }
+    if (actionDwell.update(inside, nowMs)) {
+      fireActionButton(mode, nowMs);
+    }
+  }
+
+  /**
+   * Draw the pointer UI on top of the game / hub (v3.6): the action
+   * circle (with its dwell fill), the hover ring around a refiner
+   * picker card, and the pointer cursor at the pointer point. The
+   * hub draws its own button highlight via `setPointerHighlight`,
+   * so no ring is needed there. Called from both render branches.
+   */
+  function drawPointerUI(
+    ctx: CanvasRenderingContext2D,
+    nowMs: number,
+  ): void {
+    const circle = lastActionCircle;
+    if (circle !== null && circle.visible) {
+      drawActionButton(
+        ctx,
+        canvas.width,
+        canvas.height,
+        circle.mode,
+        actionDwell.progress(nowMs),
+      );
+    }
+    if (
+      activeGame instanceof RefinerGame &&
+      !townHub.isOpen &&
+      activeGame.snapshot().phase === 'pick'
+    ) {
+      const hovered = pointer.hoveredSelectable;
+      if (hovered !== null) drawHoverRing(ctx, hovered);
+    }
+    if (lastPointerPoint !== null && activeGame !== null) {
+      // Ring radius from Worker A's hand-circle helper: the ring
+      // sits just outside the hand circle at any body distance. The
+      // torso length is the BodyState one (video units x canvas
+      // height = canvas px, same unit the avatar's joints use); with
+      // no body yet, the sim torso stands in.
+      const handRadiusPx = handCircleRadiusPx(
+        (latestBody?.torsoLength ?? SIM.torsoLength) * canvas.height,
+      );
+      drawPointerCursor(
+        ctx,
+        lastPointerPoint.x,
+        lastPointerPoint.y,
+        handRadiusPx,
+        pointer.hoveredSelectable !== null,
+      );
+    }
   }
 
   /**
@@ -421,9 +637,10 @@ function main(): void {
   }
 
   /**
-   * The refiner's "Leave to town" was tapped: the batch is already
-   * abandoned (the refiner does that before firing), so restore the
-   * suspended Swing Lab and reopen town.
+   * The refiner's action circle was dwelled / clicked for town: the
+   * batch is already abandoned (the refiner does that in
+   * `leaveToHub` before firing), so restore the suspended Swing Lab
+   * and reopen town.
    */
   function handleLeaveRefiner(): void {
     const refiner = activeGame instanceof RefinerGame ? activeGame : null;
@@ -769,16 +986,26 @@ function main(): void {
   }
 
   canvas.addEventListener('pointermove', (event) => {
+    const pixel = pointerToCanvasPx(event);
+    if (pixel !== null) {
+      // The pointer system reads this in the mouse sim (the pointer
+      // IS the mouse there); on camera it is only the sim hand's
+      // visual target, and the pointer is the left wrist instead.
+      lastPointerCanvas = pixel;
+      if (activeSource === mouse) {
+        mouse.setPointerHand(
+          toNormalized(pixel, canvas.width, canvas.height),
+        );
+      }
+    }
     // The hub is pointer-driven: while it is open, moves track the
     // hovered button (v3.3) and must not steer the sim body — this
     // branch runs for every source, not just the mouse sim.
     if (townHub.isOpen) {
-      const pixel = pointerToCanvasPx(event);
       if (pixel !== null) townHub.handlePointerMove(pixel.x, pixel.y);
       return;
     }
     if (activeSource !== mouse) return;
-    const pixel = pointerToCanvasPx(event);
     if (pixel === null) return;
     const button = (event.buttons & 2) !== 0 ? 2 : 0;
     mouse.setPointer(
@@ -787,12 +1014,40 @@ function main(): void {
       button,
     );
   });
-  // Pointer leaving the canvas clears any hovered hub button.
+  // Pointer leaving the canvas clears any hovered hub button, and
+  // drops the sim pointer hand (the pointer has nowhere to be).
   canvas.addEventListener('pointerleave', () => {
     if (townHub.isOpen) townHub.handlePointerMove(-1, -1);
+    lastPointerCanvas = null;
+    if (activeSource === mouse) mouse.setPointerHand(null);
   });
   canvas.addEventListener('pointerdown', (event) => {
     sfx.unlock();
+    const pixel = pointerToCanvasPx(event);
+    if (pixel !== null) {
+      lastPointerCanvas = pixel;
+      if (activeSource === mouse) {
+        mouse.setPointerHand(
+          toNormalized(pixel, canvas.width, canvas.height),
+        );
+      }
+      // A mouse click on the action circle fires it at once — no
+      // dwell needed for the mouse. Same action as a full dwell.
+      // Checked before the hub / sim branches so the click is
+      // swallowed here and never also steers the sim body.
+      if (
+        lastActionCircle !== null &&
+        lastActionCircle.visible &&
+        pointInActionCircle(pixel.x, pixel.y, lastActionCircle.geometry)
+      ) {
+        // Game-clock ms, not event.timeStamp: the stubs (and some
+        // browsers) leave timeStamp undefined, and the game runs on
+        // the rAF clock anyway.
+        fireActionButton(lastActionCircle.mode, lastFrameNowMs);
+        actionDwell.reset();
+        return;
+      }
+    }
     // The town hub is a modal menu: while it is open, taps belong to
     // it and are swallowed here — they must not also steer the sim
     // body. (The games' own canvas listeners are also guarded on
@@ -800,12 +1055,10 @@ function main(): void {
     // Down arms the pressed state (v3.3); up activates on release
     // over the same button.
     if (townHub.isOpen) {
-      const pixel = pointerToCanvasPx(event);
       if (pixel !== null) townHub.handlePointerDown(pixel.x, pixel.y);
       return;
     }
     if (activeSource !== mouse) return;
-    const pixel = pointerToCanvasPx(event);
     if (pixel === null) return;
     mouse.setPointer(
       toNormalized(pixel, canvas.width, canvas.height),
@@ -824,6 +1077,8 @@ function main(): void {
     if (activeSource !== mouse) return;
     const pixel = pointerToCanvasPx(event);
     if (pixel === null) return;
+    lastPointerCanvas = pixel;
+    mouse.setPointerHand(toNormalized(pixel, canvas.width, canvas.height));
     mouse.setPointer(toNormalized(pixel, canvas.width, canvas.height), false);
   });
   // Right-click raises the right arm in the sim — don't show the menu.
@@ -869,6 +1124,11 @@ function main(): void {
     // press the refiner's pedestal buttons. P, not F: F is the
     // fullscreen toggle, and W/S/Q/E/A/D/X are already sim keys.
     if (key === 'p' && activeSource === mouse) mouse.setPressing(true);
+    // C (hold) is the mouse-sim confirm key (v3.6): the RIGHT
+    // (confirm) wrist travels to the top-right action circle and
+    // holds there — hold ~2 s and the dwell fires. C, not anything
+    // else: P is the press, F is fullscreen, and the rest are taken.
+    if (key === 'c' && activeSource === mouse) mouse.setConfirming(true);
     if (key === 's' && activeSource === mouse) mouse.setDucking(true);
     if (key === 'm') btnMute.click();
     if (key === 'v') btnVideo.click();
@@ -886,6 +1146,7 @@ function main(): void {
     if (key === 'e' && activeSource === mouse) mouse.setKeyArmAngled('right', false);
     if (key === 'w' && activeSource === mouse) mouse.setJumping(false);
     if (key === 'p' && activeSource === mouse) mouse.setPressing(false);
+    if (key === 'c' && activeSource === mouse) mouse.setConfirming(false);
     if (key === 's' && activeSource === mouse) mouse.setDucking(false);
   });
 
@@ -927,6 +1188,9 @@ function main(): void {
         gateOptions,
       );
       applyGate(gate);
+      // Pointer + action button (v3.6): runs even while gated, so a
+      // lost body clears the hover instead of leaving it stale.
+      updatePointerSystem(nowMs);
       if (gate.gated) return;
       if (pendingStart && pause.kind === 'none') {
         // Going to town before the first start defers the start: the
@@ -966,6 +1230,9 @@ function main(): void {
       // gate state stays current while the player is in town.
       if (townHub.isOpen) {
         townHub.render(context, nowMs);
+        // Pointer UI on top of town: the action circle (ok mode
+        // while hovering) + the pointer cursor.
+        drawPointerUI(context, nowMs);
         // The HUD below the canvas is DOM, not game drawing: keep it
         // live so it names the activity town will return to (after a
         // swap it shows the restored game, not the one left behind).
@@ -1003,6 +1270,9 @@ function main(): void {
       if (activeGame !== null) {
         activeGame.render(context, nowMs, latestBody, latestLandmarks);
         gameHud.innerHTML = activeGame.hudHtml();
+        // Pointer UI on top of the game: the action circle (with its
+        // dwell fill), the picker hover ring, the pointer cursor.
+        drawPointerUI(context, nowMs);
       }
 
       // Blocking overlay on the stage itself when gated: model failure

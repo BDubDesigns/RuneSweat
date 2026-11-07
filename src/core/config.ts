@@ -636,6 +636,18 @@ export const POINTER = {
  * when the pointer hovers a selectable thing (dwell = click it).
  * The label under the circle changes with the mode too.
  */
+/** YouVille point-and-pull lever gesture tuning. BodyState arm angles: +/-90 horizontal, +/-180 down. */
+export const LEVER_CONFIRM = {
+  horizontalMinDeg: 70,
+  horizontalMaxDeg: 110,
+  horizontalHoldMs: 180,
+  pullStartDeg: 115,
+  downMinDeg: 150,
+  downHoldMs: 120,
+  maxPullMs: 1400,
+  minIntervalMs: 450,
+} as const;
+
 export const ACTION_BUTTON = {
   /** Hold time for a dwell to fire, in ms. */
   dwellMs: 2000,

@@ -1,15 +1,4 @@
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error — @types/node is not installed in this repo, so
-// node:fs has no type declarations; the import works at runtime
-// because vitest runs in node. Only used to read the real CSS/HTML.
-import { readFileSync as readFileSyncUntyped } from 'node:fs';
-/**
- * Typed alias for the import above: the unresolved import is
- * `error`-typed, so calling it directly trips the no-unsafe-* lint
- * rules. The cast pins the one signature this test uses.
- */
-const readFileSync: (path: string, encoding: 'utf8') => string =
-  readFileSyncUntyped as (path: string, encoding: 'utf8') => string;
 import { RENDER } from '../core/config';
 import {
   GATE_BANNER,
@@ -209,17 +198,6 @@ describe('drawGateBanner (v3.2)', () => {
   });
 });
 
-/**
- * Page fit at the Nov 4 playtest size (v3.2): the page (stage + HUD +
- * buttons + status) must fit the viewport with no scroll and no
- * clipping. Node cannot lay out a real browser, so this test does the
- * arithmetic from the actual CSS + DOM: it reads the stage reserves
- * out of `styles.css` and the button labels out of `index.html`, and
- * asserts stage height + measured chrome <= viewport height for the
- * viewports that matter. What it cannot prove — the real window on
- * Brandon's laptop, real font metrics, real camera feel — is stated
- * in the report, not here.
- */
 describe('drawActionButton + drawPointerCursor (v3.6)', () => {
   /** Records arcs with the stroke/fill style in force + texts + rects. */
   function actionRecordingContext(): {
@@ -411,106 +389,5 @@ describe('drawActionButton + drawPointerCursor (v3.6)', () => {
       (r) => r.x === 157 && r.y === 137 && r.w === 646 && r.h === 102,
     );
     expect(ring).toBeDefined();
-  });
-});
-
-describe('page fit at 1728x1080 (v3.2)', () => {
-  // Read from the repo root (vitest runs with cwd = the package
-  // root), so the numbers below always come from the real files.
-  const css = readFileSync('src/styles.css', 'utf8');
-  const html = readFileSync('index.html', 'utf8');
-
-  /** Stage reserves (px) from the stage-wrap width formulas. */
-  function stageReserves(): { normal: number; fullscreen: number } {
-    const matches = [...css.matchAll(/100dvh - (\d+)px/g)].map((m) =>
-      Number(m[1]),
-    );
-    expect(matches).toHaveLength(2);
-    return { normal: matches[0] ?? 0, fullscreen: matches[1] ?? 0 };
-  }
-
-  /** Chrome heights (px), measured from styles.css + the HUD spans. */
-  function chromeFor(vh: number, controlsRows: number): number {
-    // #app padding 16 top + 16 bottom.
-    const padding = 32;
-    // Header: h1 2.6rem (~50px line) + tagline (~21px) + 4px margin
-    // = ~75; under 1000px viewport height the tagline hides and the
-    // h1 shrinks to 1.8rem (~35px line) = ~50... the media query
-    // keeps the h1 at 1.8rem, so 35px + no tagline = 35.
-    const header = vh < 1000 ? 35 : 75;
-    // #app gaps during play: header -> stage-section, stage-section
-    // -> legend (2 x 12). The stage-section's own children stack
-    // flush (no gap, no margins).
-    const gaps = 24;
-    // HUD: 1.15rem font, ~22px/line, 3 lines worst case (stats +
-    // phase + instruction wrap).
-    const hud = 3 * 22;
-    // Controls: one row ~44px (10px padding x2 + ~22px line).
-    const controls = controlsRows * 44 + (controlsRows - 1) * 8;
-    // Body-status line (#out-of-frame): 1.1rem, one line.
-    const status = 24;
-    // Legend: 0.9rem (0.85rem under 1000px), 2 lines.
-    const legend = vh < 1000 ? 34 : 40;
-    return padding + header + gaps + hud + controls + status + legend;
-  }
-
-  /** Estimated button-row width from the real labels in index.html. */
-  function controlsRowWidth(): number {
-    const controlsBlock = html.split('<div class="controls">')[1];
-    if (controlsBlock === undefined) throw new Error('no .controls in index.html');
-    const labels = [...controlsBlock.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map(
-      (m) => (m[1] ?? '').trim(),
-    );
-    expect(labels).toHaveLength(8);
-    // Conservative estimate at 1rem: 10px per UTF-16 unit (emoji count
-    // double) + 28px horizontal padding per button + 8px gaps. Real
-    // rendering is narrower (average glyph ~7-8px), so a pass here
-    // has margin.
-    return (
-      labels.reduce((sum, label) => sum + label.length * 10 + 28, 0) +
-      (labels.length - 1) * 8
-    );
-  }
-
-  function totalPageHeight(vw: number, vh: number, reserve: number): number {
-    const contentW = Math.min(vw, 1280) - 32;
-    const stageW = Math.min(contentW, ((vh - reserve) * 16) / 9);
-    const stageH = (stageW * 9) / 16;
-    const rows = controlsRowWidth() <= contentW ? 1 : 2;
-    return stageH + chromeFor(vh, rows);
-  }
-
-  it('the stage reserve covers the measured chrome', () => {
-    const { normal, fullscreen } = stageReserves();
-    // 3-line HUD chrome with the tagline shown.
-    expect(normal).toBeGreaterThanOrEqual(chromeFor(1080, 1));
-    expect(normal).toBe(440);
-    // Fullscreen chrome is smaller (no header, padding 12): 24 +
-    // 48 gaps + 66 HUD + 44 controls + 24 status + 40 legend = 246.
-    expect(fullscreen).toBeGreaterThanOrEqual(246);
-    expect(fullscreen).toBe(380);
-  });
-
-  it('the whole page fits at 1728x1080 and at 1728x980 (browser chrome)', () => {
-    const { normal } = stageReserves();
-    for (const [vw, vh] of [
-      [1728, 1080],
-      [1728, 980],
-      [1280, 800],
-      [1024, 768],
-    ] as const) {
-      expect(totalPageHeight(vw, vh, normal)).toBeLessThanOrEqual(vh);
-    }
-  });
-
-  it('the button row fits on one line at desktop widths and wraps (never overflows)', () => {
-    expect(controlsRowWidth()).toBeLessThanOrEqual(1248);
-    expect(css).toContain('.controls {');
-    expect(css).toMatch(/\.controls \{[^}]*flex-wrap: wrap/s);
-    expect(css).toMatch(/\.game-hud \{[^}]*flex-wrap: wrap/s);
-  });
-
-  it('the page cannot scroll horizontally', () => {
-    expect(css).toMatch(/overflow-x: (hidden|clip)/);
   });
 });

@@ -1,4 +1,92 @@
-# RuneSweat
+# YouVille 0.1 (working title)
+
+The first small, complete YouVille experience, built on RuneSweat's
+on-device pose tracking. Wake up as a plain little avatar in your own
+bedroom, walk to the closet, open the door with a gesture (or touch),
+build your character in the real closet room by pointing at options and
+pulling an imaginary lever, then walk back out wearing it.
+
+*YouVille is a working title, not a trademark-cleared release name.*
+Spec and decisions: issue #3. The old RuneSweat hub (mine, refiner,
+town, Bix's shop) is no longer reachable from the page; its code and
+history stay in the repo (`src/main.ts`, `src/hub`, `src/games`).
+
+## Playing
+
+```bash
+npm ci --legacy-peer-deps
+npm run download-model   # pose model + WASM (only needed for the camera)
+npm run dev              # http://localhost:5173
+```
+
+- **Touch / keyboard (always works):** ◀ ▶ or the arrow keys / `A` `D`
+  walk; at the closet door press **Enter** (or the 🚪 Enter button, or tap
+  the door). In the closet tap/click an option, or use the arrow keys and
+  `Enter`; **Done** returns you to the bedroom.
+- **Camera (optional, explicit):** tap **📷 Use camera**. Step back so
+  your head, shoulders and hips fit in view. Lean/step sideways to walk
+  (relative to where you stood when tracking started; the room never
+  moves with your skeleton).
+- **Door interaction** setting (no gender/handedness rules; Enter always
+  also works):
+  - **Disco point**: one hand points up to one side, swings down across
+    the body to the other side, then back up (two diagonal passes).
+  - **T-drop**: hold both arms out in a T, then drop both arms to your
+    sides. Standing with arms down never opens the door.
+- **Closet creator:** one hand is the pointer (previews the option under
+  it live), the other, extended arm is the lever: hold it straight out
+  to the side, then pull it down. The option you were pointing at when
+  the pull started is the one that locks in. `H` / the 🤚 button swaps
+  which hand points. Skin tone (10), hairstyle (7), shirt color (6).
+- `G` toggles a debug overlay (skeleton landmarks only, recognizer
+  states, arm angles).
+
+Your appearance lives in memory for the session only (reset on refresh;
+the schema in `src/creator/avatarAppearance.ts` is ready for a future
+server-owned profile). No new localStorage keys, no backend, no
+accounts, no microphone. Camera frames and pose landmarks never leave
+the device.
+
+## Code map (`src/youville/`)
+
+| Module | Role |
+| --- | --- |
+| `rooms.ts` | `RoomDef` / `DoorDef` data: bedroom, closet, doors, prop shapes |
+| `session.ts` | `YouVilleSession`: pure game state + wiring (no DOM/canvas) |
+| `interaction.ts`, `gestures/` | `GestureRecognizer` contract, registry, Travolta + T-drop |
+| `doorController.ts` | the one gatekeeper: proximity, cooldown, freshness, exactly-once |
+| `roomTransition.ts` | the one reusable fade (out, switch while covered, in) |
+| `lateralMover.ts` | bounded, smoothed, relative lateral walking; no teleport |
+| `closetLayout.ts`, `characterCreator.ts` | fixed selection layout, hover preview, lever confirm |
+| `art/` | modular vector drawing (avatar, rooms, closet UI); cached room layers |
+| `app.ts` | DOM, camera, loop |
+
+Reused from RuneSweat: camera + MediaPipe source, `BodyStateTracker`
+(smoothing, handedness latch), the fixed-step loop, `toCanvas` mirroring,
+the lever detector and appearance model from PR #2.
+
+## Verification status
+
+`npm test`, `npm run typecheck`, `npm run lint`, `npm run build` all pass,
+including unit tests for both door gestures, the door controller,
+transition, walking, the closet layout/creator/lever, and end-to-end
+session tests (touch-only, T-drop and Travolta via the real tracker with
+synthetic poses). **Synthetic tests do not establish physical
+playability: the real-camera Pixel playtest is release-gating and has not
+been run.** Gesture thresholds live in `src/youville/config.ts`
+(`TRAVOLTA`, `T_DROP`, `WALK`) and `LEVER_CONFIRM` in `src/core/config.ts`
+and are expected to be tuned from that playtest.
+
+## Deploying
+
+`.github/workflows/ci.yml` runs the checks on PRs. Production is the
+`gh-pages` branch; `.github/workflows/deploy-pages.yml` is a
+**manual-only** workflow that builds this branch and replaces `gh-pages`.
+Nothing deploys automatically.
+
+---
+
+# RuneSweat (legacy)
 
 Active RuneSpace: swing, carry, jump, craft, fight — your body is the
 controller. Single-player, full-body camera pose game.

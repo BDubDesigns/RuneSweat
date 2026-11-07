@@ -11,6 +11,15 @@ leaves the device.
 > v3.1 rounds all happened in this codebase and are RuneSweat's history
 > too. Live at bdubdesigns.github.io/RuneSweat/.
 
+## YouVille 0.1 (Nov 7, 2026, issue #3)
+
+The player-facing page is now YouVille (working title): bedroom ->
+closet door (Disco-point or T-drop gesture, or touch) -> fade -> closet
+creator (point + lever) -> fade -> bedroom. The RuneSweat hub/games are
+unreferenced but kept in the tree. See README "YouVille 0.1" for the
+code map and `src/youville/config.ts` for the tunables a Pixel
+playtest should adjust. Not yet verified on a real camera.
+
 ## Why this exists
 
 The Nov 3, 2026 motion-detection Bubble Pop was liked by Brandon but NOT

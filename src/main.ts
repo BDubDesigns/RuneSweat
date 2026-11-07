@@ -1,4 +1,9 @@
 /**
+ * RETIRED ENTRY (YouVille 0.1, issue #3): `index.html` now loads
+ * `src/youville/main.ts`. This is the old RuneSweat hub bootstrap, kept
+ * (with its games, town hub and tests) as reference and reusable code;
+ * nothing in the player-facing page imports it.
+ *
  * RuneSweat — hub bootstrap.
  *
  * The hub owns: the camera, the pose source, the fixed-timestep loop, the

@@ -1,0 +1,51 @@
+# Manual deploy to the existing GitHub Pages branch (`gh-pages`).
+#
+# This never runs automatically: production only changes when someone
+# presses "Run workflow" on a branch they have verified (tests green,
+# and for camera behaviour a real-device playtest). It builds the app,
+# fetches the pose model + WASM (git-ignored, see scripts/download-model.sh)
+# and replaces the contents of the gh-pages branch with dist/.
+name: Deploy to GitHub Pages (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npm run download-model
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: Publish dist/ to gh-pages
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse --short HEAD)"
+          version="$(node -p "require('./package.json').version")"
+          git fetch origin gh-pages
+          git worktree add ../pages origin/gh-pages
+          cd ../pages
+          git checkout -B gh-pages
+          git rm -rq --ignore-unmatch . || true
+          cp -R "$GITHUB_WORKSPACE/dist/." .
+          touch .nojekyll
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Deploy YouVille ${version} (${sha})" || { echo "nothing to deploy"; exit 0; }
+          git push origin gh-pages

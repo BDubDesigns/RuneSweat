@@ -95,6 +95,12 @@ export interface BodyState {
    *  lines are measured from here (wrist height above/below the shoulders).
    */
   shoulderY: number;
+  /**
+   * Shoulder-midpoint x, video space [0,1] (raw landmark midpoint, not
+   * smoothed). YouVille's door gestures measure wrists relative to the
+   * body midline with it, so they are side- and mirror-agnostic.
+   */
+  shoulderMidX: number;
   /** Smoothed wrist positions, video space [0,1]. */
   leftWristX: number;
   rightWristX: number;
@@ -569,6 +575,7 @@ export class BodyStateTracker {
         landmarkVisibility: absentVisibility(),
         kneesVisible: false,
         shoulderY: 0.5,
+        shoulderMidX: 0.5,
         leftWristX: 0.5,
         rightWristX: 0.5,
         leftWristY: 0.5,
@@ -617,6 +624,7 @@ export class BodyStateTracker {
         landmarkVisibility: absentVisibility(),
         kneesVisible: false,
         shoulderY: 0.5,
+        shoulderMidX: 0.5,
         leftWristX: 0.5,
         rightWristX: 0.5,
         leftWristY: 0.5,
@@ -761,6 +769,7 @@ export class BodyStateTracker {
       landmarkVisibility,
       kneesVisible,
       shoulderY,
+      shoulderMidX: shoulderMid.x,
       leftWristX: leftWristSm.x,
       rightWristX: rightWristSm.x,
       leftWristY: leftWristSm.y,
